@@ -232,7 +232,14 @@ class CompanionAppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             manager.pttOverlayManager = pttOverlay
 
             APIKeyConfig.printStatus()
+
+            // Connect to configured MCP servers
+            Task {
+                await MCPClientManager.shared.connectAll()
+            }
+
             print("[CursorBuddy] All managers initialized. Push-to-talk ready (hold \(PushToTalkShortcutConfiguration.shared.label)).")
+            print("[CursorBuddy] MCP: \(MCPServerConfigStore.shared.enabledServers.count) server(s) configured")
             print("[CursorBuddy] Version \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "??")")
         }
     }

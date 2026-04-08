@@ -16,6 +16,7 @@ let package = Package(
         .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.0.0"),
         .package(url: "https://github.com/PostHog/posthog-ios", from: "3.0.0"),
         .package(url: "https://github.com/microsoft/plcrashreporter", from: "1.11.0"),
+        .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", from: "0.9.0"),
     ],
     targets: [
         .executableTarget(
@@ -23,7 +24,8 @@ let package = Package(
             dependencies: [
                 .product(name: "Sparkle", package: "Sparkle"),
                 .product(name: "PostHog", package: "posthog-ios"),
-                .product(name: "CrasffffdfdfadsadasdasdasdashReporter", package: "plcrashreporter"),
+                .product(name: "CrashReporter", package: "plcrashreporter"),
+                .product(name: "MCP", package: "swift-sdk"),
             ],
             path: "CursorBuddy",
             exclude: [

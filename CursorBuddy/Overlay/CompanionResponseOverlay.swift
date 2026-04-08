@@ -77,13 +77,20 @@ struct CompanionResponseOverlayView: View {
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
-            .frame(maxWidth: 360, maxHeight: 200, alignment: .topLeading)
+            .frame(minWidth: 120, maxWidth: 360, minHeight: 40, maxHeight: 200, alignment: .topLeading)
             .background {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(.clear)
-                    .glassEffect(.regular)
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(Color.blue.opacity(0.08))
+                    }
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(.white.opacity(0.12), lineWidth: 1)
+                    }
             }
-            .shadow(color: .black.opacity(0.25), radius: 10, x: 0, y: 4)
+            .shadow(color: .blue.opacity(0.15), radius: 12, x: 0, y: 4)
             .opacity(viewModel.opacity)
             .allowsHitTesting(false)
         }

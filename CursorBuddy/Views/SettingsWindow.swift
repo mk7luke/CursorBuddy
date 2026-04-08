@@ -55,12 +55,12 @@ final class SettingsWindowController: NSObject, @unchecked Sendable {
         // Hide the chat panel while settings is open
         CompanionAppDelegate.shared.menuBarPanelManager?.dismissPanel()
 
+        // LSUIElement apps can't receive keyboard focus. Temporarily
+        // become a regular app so the window gets full key input.
+        NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         settingsWindow.level = .normal
         settingsWindow.makeKeyAndOrderFront(nil)
-        settingsWindow.orderFrontRegardless()
-        // Ensure the window is key so text fields accept keyboard input
-        NSApp.activate(ignoringOtherApps: true)
         settingsWindow.makeKey()
         settingsWindow.makeFirstResponder(settingsWindow.contentView)
         // Post after window is visible so the SwiftUI view is mounted and listening
@@ -76,6 +76,9 @@ final class SettingsWindowController: NSObject, @unchecked Sendable {
 
 extension SettingsWindowController: NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
+        // Revert to accessory (menu bar only) so dock icon disappears
+        NSApp.setActivationPolicy(.accessory)
+
         // Restore the chat panel when settings is closed
         if PanelPinState.shared.isPinned {
             CompanionAppDelegate.shared.menuBarPanelManager?.restorePanel()
@@ -100,6 +103,7 @@ extension Notification.Name {
 
 enum SettingsTab: String, CaseIterable, Identifiable {
     case apiKeys = "API Keys"
+    case mcpServers = "MCP Servers"
     case transcription = "Transcription"
     case tts = "Text-to-Speech"
     case shortcuts = "Shortcuts"
@@ -111,6 +115,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .apiKeys: return "key.fill"
+        case .mcpServers: return "server.rack"
         case .transcription: return "waveform"
         case .tts: return "speaker.wave.2.fill"
         case .shortcuts: return "keyboard"
@@ -163,7 +168,7 @@ struct SettingsView: View {
                 Spacer()
             }
             .padding(.vertical, 12)
-            .frame(width: 160)
+            .frame(width: 180)
             .background(Color(nsColor: .windowBackgroundColor).opacity(0.4))
 
             Divider()
@@ -200,6 +205,8 @@ struct TabContentView: View {
                 switch selectedTab {
                 case .apiKeys:
                     APIKeysSettingsView()
+                case .mcpServers:
+                    MCPSettingsView()
                 case .transcription:
                     TranscriptionSettingsView()
                 case .tts:

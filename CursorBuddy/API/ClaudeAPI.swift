@@ -34,28 +34,21 @@ format: [POINT:x,y:label] where x,y are integer pixel coordinates in the screens
 - if the user's question relates to what's on their screen, reference specific things you see.
 - if you receive multiple screen images, the one labeled "primary focus" is where the cursor is.
 - you can point at anything visible on screen – buttons, menus, sidebar items, toolbar icons, text, whatever is most relevant. no restrictions on where you can point.
+
+IMPORTANT: FILE SYSTEM & COMMAND ACCESS
+you have direct access to the user's file system and can execute commands through tools. when the user asks you to create, read, edit, or delete files, or run terminal commands, or control apps - actually do it using your tools. don't say you can't - you have these capabilities:
+- read_file, write_file, create_file, delete_file - for file operations
+- list_directory, create_directory - for directories
+- move_file, copy_file - for file management
+- execute_command - to run any shell command (git, npm, python, swift, etc)
+- launch_app, terminate_app, get_running_apps - for app control
+- send_applescript - for macOS automation
+when the user asks you to do something with files or commands, just do it. be helpful and proactive with these tools.
 """
 
     struct Message {
         let role: String
         let content: String
-    }
-
-    /// Anthropic-recommended resolutions for Computer Use, matched to display aspect ratio.
-    private static let computerUseResolutions: [(width: Int, height: Int, aspectRatio: Double)] = [
-        (1024, 768,  1024.0 / 768.0),   // 4:3   (legacy)
-        (1280, 800,  1280.0 / 800.0),   // 16:10  (MacBook Air/Pro)
-        (1366, 768,  1366.0 / 768.0)    // ~16:9  (external monitors)
-    ]
-
-    /// Pick the Computer Use resolution closest to the primary display's aspect ratio.
-    private func bestComputerUseResolution() -> (width: Int, height: Int) {
-        guard let screen = NSScreen.main else { return (1280, 800) }
-        let displayAR = screen.frame.width / screen.frame.height
-        let best = Self.computerUseResolutions.min(by: {
-            abs($0.aspectRatio - displayAR) < abs($1.aspectRatio - displayAR)
-        })!
-        return (best.width, best.height)
     }
 
     func sendMessage(messages: [Message], screenshots: [String], screenLabels: [String]) -> AsyncThrowingStream<String, Error> {
@@ -138,13 +131,22 @@ format: [POINT:x,y:label] where x,y are integer pixel coordinates in the screens
             }
         }
 
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "model": model,                          
             "max_tokens": 4096,
             "stream": true,
             "system": self.systemPrompt,
             "messages": apiMessages
         ]
+
+        // Inject tools: built-in + MCP
+        var allTools: [[String: Any]] = await BuiltInTools.shared.claudeToolDefinitions
+        let mcpTools = await MCPClientManager.shared.claudeToolDefinitions
+        allTools.append(contentsOf: mcpTools)
+        if !allTools.isEmpty {
+            body["tools"] = allTools
+            self.logger.info("Including \(allTools.count) tool(s) in request (\(allTools.count - mcpTools.count) built-in, \(mcpTools.count) MCP)")
+        }
 
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
@@ -171,8 +173,14 @@ format: [POINT:x,y:label] where x,y are integer pixel coordinates in the screens
                           userInfo: [NSLocalizedDescriptionKey: userMessage])
         }
 
-        // Parse SSE stream
+        // Parse SSE stream — handles both text and tool_use content blocks
         var currentEvent = ""
+        var pendingToolCalls: [(id: String, name: String, inputJSON: String)] = []
+        var currentToolCallID: String?
+        var currentToolCallName: String?
+        var currentToolInputJSON = ""
+        var stopReason: String?
+
         for try await line in bytes.lines {
             if Task.isCancelled { break }
 
@@ -180,24 +188,149 @@ format: [POINT:x,y:label] where x,y are integer pixel coordinates in the screens
                 currentEvent = String(line.dropFirst(7))
             } else if line.hasPrefix("data: ") {
                 let data = String(line.dropFirst(6))
+                guard let jsonData = data.data(using: .utf8),
+                      let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
+                    continue
+                }
 
-                if currentEvent == "content_block_delta" {
-                    if let jsonData = data.data(using: .utf8),
-                       let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
-                       let delta = json["delta"] as? [String: Any],
-                       let text = delta["text"] as? String {
-                        continuation.yield(text)
+                switch currentEvent {
+                case "content_block_start":
+                    if let contentBlock = json["content_block"] as? [String: Any],
+                       let blockType = contentBlock["type"] as? String {
+                        if blockType == "tool_use" {
+                            currentToolCallID = contentBlock["id"] as? String
+                            currentToolCallName = contentBlock["name"] as? String
+                            currentToolInputJSON = ""
+                        }
                     }
-                } else if currentEvent == "message_stop" {
+
+                case "content_block_delta":
+                    if let delta = json["delta"] as? [String: Any],
+                       let deltaType = delta["type"] as? String {
+                        if deltaType == "text_delta", let text = delta["text"] as? String {
+                            continuation.yield(text)
+                        } else if deltaType == "input_json_delta", let partial = delta["partial_json"] as? String {
+                            currentToolInputJSON += partial
+                        }
+                    }
+
+                case "content_block_stop":
+                    if let toolID = currentToolCallID, let toolName = currentToolCallName {
+                        pendingToolCalls.append((id: toolID, name: toolName, inputJSON: currentToolInputJSON))
+                        self.logger.info("Tool call queued: \(toolName) (\(toolID))")
+                        currentToolCallID = nil
+                        currentToolCallName = nil
+                        currentToolInputJSON = ""
+                    }
+
+                case "message_delta":
+                    if let delta = json["delta"] as? [String: Any] {
+                        stopReason = delta["stop_reason"] as? String
+                    }
+
+                case "message_stop":
                     break
-                } else if currentEvent == "error" {
-                    if let jsonData = data.data(using: .utf8),
-                       let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
-                       let error = json["error"] as? [String: Any],
+
+                case "error":
+                    if let error = json["error"] as? [String: Any],
                        let message = error["message"] as? String {
                         let streamCode = self.parseAnthropicErrorCode(from: error)
                         throw NSError(domain: "ClaudeAPI", code: streamCode,
                                       userInfo: [NSLocalizedDescriptionKey: message])
+                    }
+
+                default:
+                    break
+                }
+
+                if currentEvent == "message_stop" { break }
+            }
+        }
+
+        // If Claude requested tool calls, execute them and send results back
+        if stopReason == "tool_use" && !pendingToolCalls.isEmpty {
+            self.logger.info("Executing \(pendingToolCalls.count) MCP tool call(s)...")
+            continuation.yield("\n[calling \(pendingToolCalls.map(\.name).joined(separator: ", "))...]\n")
+
+            // Build tool results
+            var toolResultBlocks: [[String: Any]] = []
+            for call in pendingToolCalls {
+                let args = (try? JSONSerialization.jsonObject(
+                    with: Data(call.inputJSON.utf8)
+                ) as? [String: Any]) ?? [:]
+
+                do {
+                    let result: String
+                    if await BuiltInTools.shared.isBuiltIn(call.name) {
+                        result = try await BuiltInTools.shared.execute(name: call.name, arguments: args)
+                    } else {
+                        result = try await MCPClientManager.shared.callTool(name: call.name, arguments: args)
+                    }
+                    toolResultBlocks.append([
+                        "type": "tool_result",
+                        "tool_use_id": call.id,
+                        "content": result
+                    ])
+                    self.logger.info("Tool '\(call.name)' returned \(result.prefix(100))...")
+                } catch {
+                    toolResultBlocks.append([
+                        "type": "tool_result",
+                        "tool_use_id": call.id,
+                        "content": "Error: \(error.localizedDescription)",
+                        "is_error": true
+                    ])
+                    self.logger.error("Tool '\(call.name)' failed: \(error.localizedDescription)")
+                }
+            }
+
+            // Build assistant message with tool_use blocks, then user message with tool_result
+            var assistantContent: [[String: Any]] = []
+            for call in pendingToolCalls {
+                let args = (try? JSONSerialization.jsonObject(
+                    with: Data(call.inputJSON.utf8)
+                ) as? [String: Any]) ?? [:]
+                assistantContent.append([
+                    "type": "tool_use",
+                    "id": call.id,
+                    "name": call.name,
+                    "input": args
+                ])
+            }
+
+            apiMessages.append(["role": "assistant", "content": assistantContent])
+            apiMessages.append(["role": "user", "content": toolResultBlocks])
+
+            // Send follow-up request with tool results
+            var followUpBody = body
+            followUpBody["messages"] = apiMessages
+
+            var followUpRequest = request
+            followUpRequest.httpBody = try JSONSerialization.data(withJSONObject: followUpBody)
+
+            let (followUpBytes, followUpResponse) = try await URLSession.shared.bytes(for: followUpRequest)
+            guard let followUpHTTP = followUpResponse as? HTTPURLResponse,
+                  followUpHTTP.statusCode == 200 else {
+                throw NSError(domain: "ClaudeAPI", code: -1,
+                              userInfo: [NSLocalizedDescriptionKey: "Tool result follow-up failed"])
+            }
+
+            // Parse the follow-up stream for the final text response
+            var followUpEvent = ""
+            for try await line in followUpBytes.lines {
+                if Task.isCancelled { break }
+                if line.hasPrefix("event: ") {
+                    followUpEvent = String(line.dropFirst(7))
+                } else if line.hasPrefix("data: ") {
+                    let fData = String(line.dropFirst(6))
+                    if followUpEvent == "content_block_delta" {
+                        if let jd = fData.data(using: .utf8),
+                           let j = try? JSONSerialization.jsonObject(with: jd) as? [String: Any],
+                           let d = j["delta"] as? [String: Any],
+                           let text = d["text"] as? String {
+                            continuation.yield(text)
+                        }
+                    } else if followUpEvent == "message_stop" {
+                        break
                     }
                 }
             }

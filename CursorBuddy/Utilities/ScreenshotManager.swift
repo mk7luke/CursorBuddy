@@ -8,11 +8,16 @@ struct ScreenCapture {
     let imageData: Data
     let label: String
     let cgImage: CGImage
-    /// The actual screen frame (in screen points) this capture came from
+    /// The actual screen frame (AppKit coords, bottom-left origin)
     let screenFrame: CGRect
     /// The pixel dimensions of the captured image (what Claude sees)
     let captureWidth: Int
     let captureHeight: Int
+    /// The display size in points (for coordinate conversion)
+    let displayWidthInPoints: Int
+    let displayHeightInPoints: Int
+    /// Whether the cursor is on this screen
+    let isCursorScreen: Bool
     /// The user's cursor position in screenshot pixel coordinates (top-left origin)
     let cursorInImageX: Int
     let cursorInImageY: Int
@@ -22,21 +27,21 @@ struct ScreenCapture {
         let bitmapRep = NSBitmapImageRep(cgImage: cgImage)
         guard let jpegData = bitmapRep.representation(
             using: .jpeg,
-            properties: [.compressionFactor: 0.5]
+            properties: [.compressionFactor: 0.8]
         ) else { return nil }
         return jpegData.base64EncodedString()
     }
 
     /// Convert a [POINT:x,y] from screenshot pixel space to overlay screen-point space.
     ///
-    /// The screenshot is captureWidth x captureHeight pixels.
-    /// The overlay covers the screen which is screenFrame.width x screenFrame.height points.
-    /// Both have top-left origin. Simple ratio scale.
+    /// Claude's coordinates are in the screenshot's pixel space (e.g. 1280x800).
+    /// The overlay covers the screen in display points (e.g. 1512x982).
+    /// Scale from screenshot pixels → display points.
     func screenshotPointToOverlayPoint(_ point: CGPoint) -> CGPoint {
-        let scaleX = screenFrame.width / CGFloat(captureWidth)
-        let scaleY = screenFrame.height / CGFloat(captureHeight)
+        let scaleX = CGFloat(displayWidthInPoints) / CGFloat(captureWidth)
+        let scaleY = CGFloat(displayHeightInPoints) / CGFloat(captureHeight)
         let result = CGPoint(x: point.x * scaleX, y: point.y * scaleY)
-        print("[ScreenCapture] Point conversion: (\(point.x), \(point.y)) × (\(scaleX), \(scaleY)) → (\(result.x), \(result.y))  [capture \(captureWidth)x\(captureHeight), screen \(screenFrame.width)x\(screenFrame.height)]")
+        print("[ScreenCapture] Point conversion: (\(point.x), \(point.y)) × (\(scaleX), \(scaleY)) → (\(result.x), \(result.y))  [capture \(captureWidth)x\(captureHeight), display \(displayWidthInPoints)x\(displayHeightInPoints)]")
         return result
     }
 }
@@ -68,24 +73,25 @@ class CompanionScreenCapture {
     /// Set this to the floating button panel so it can be excluded from captures
     var floatingButtonWindowToExcludeFromCaptures: NSWindow?
 
+    /// Max dimension for captured screenshots. Matches Clicky's approach:
+    /// smaller images = faster API calls + Claude reasons about coordinates accurately.
+    private let maxCaptureDimension = 1280
+
     // MARK: - Permission Check
 
-    /// Check if we have screen recording permission.
-    /// Delegates to CompanionPermissionCenter — single source of truth.
     func hasScreenRecordingPermission() -> Bool {
         CompanionPermissionCenter.shouldTreatScreenRecordingAsGranted()
     }
 
-    /// Request screen recording permission.
     func requestScreenRecordingPermission() {
         CompanionPermissionCenter.requestScreenRecordingPermission()
     }
 
     // MARK: - Capture
 
-    /// Capture the primary display. When `cursorAreaOnly` is true, crops to an 800x600
-    /// region around the cursor for faster inference on contextual "what is this?" questions.
-    /// Falls back to full-screen if the crop would be too small.
+    /// Capture all connected displays as JPEG data.
+    /// Screenshots are scaled to maxCaptureDimension for performance.
+    /// Claude's [POINT:] coordinates are in the screenshot pixel space.
     func captureScreen(cursorAreaOnly: Bool = false) async throws -> [ScreenCapture] {
         let content: SCShareableContent
         do {
@@ -100,97 +106,148 @@ class CompanionScreenCapture {
             throw ScreenCaptureError.noDisplaysFound
         }
 
-        // Determine which display the cursor is on
-        let primaryDisplayID = displayContainingCursor(displays: displays, cursorLocation: .zero)
+        let mouseLocation = NSEvent.mouseLocation
 
-        // Build exclusion list for the floating button window
-        let excludedWindows = buildExcludedWindows(from: content.windows)
+        // Exclude all windows belonging to this app (overlays, panels, etc.)
+        let ownBundleID = Bundle.main.bundleIdentifier ?? ""
+        let excludedWindows = content.windows.filter { window in
+            window.owningApplication?.bundleIdentifier == ownBundleID
+        }
+
+        // Also exclude the floating button panel
+        if let panelToExclude = floatingButtonWindowToExcludeFromCaptures {
+            let panelWindowNumber = panelToExclude.windowNumber
+            for window in content.windows {
+                if window.windowID == CGWindowID(panelWindowNumber) {
+                    // Already in excludedWindows via bundle ID match
+                    break
+                }
+            }
+        }
+
+        // Build NSScreen lookup by display ID for AppKit coordinate frames
+        var nsScreenByDisplayID: [CGDirectDisplayID: NSScreen] = [:]
+        for screen in NSScreen.screens {
+            if let screenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID {
+                nsScreenByDisplayID[screenNumber] = screen
+            }
+        }
+
+        // Sort displays so cursor screen is first
+        let sortedDisplays = displays.sorted { a, b in
+            let frameA = nsScreenByDisplayID[a.displayID]?.frame ?? a.frame
+            let frameB = nsScreenByDisplayID[b.displayID]?.frame ?? b.frame
+            let aHasCursor = frameA.contains(mouseLocation)
+            let bHasCursor = frameB.contains(mouseLocation)
+            if aHasCursor != bHasCursor { return aHasCursor }
+            return false
+        }
 
         var captures: [ScreenCapture] = []
 
         // Get cursor position in CG coordinates (top-left origin)
         let cgCursorPos = CGEvent(source: nil)?.location ?? .zero
 
-        for display in displays {
-            let isPrimary = display.displayID == primaryDisplayID
-            if !isPrimary { continue }  // Only capture the screen the cursor is on
-            let label = "primary focus"
+        for (displayIndex, display) in sortedDisplays.enumerated() {
+            // Use NSScreen.frame (AppKit coords, bottom-left origin)
+            let displayFrame = nsScreenByDisplayID[display.displayID]?.frame
+                ?? CGRect(x: display.frame.origin.x, y: display.frame.origin.y,
+                          width: CGFloat(display.width), height: CGFloat(display.height))
+            let isCursorScreen = displayFrame.contains(mouseLocation)
+
+            // Only capture cursor screen for efficiency (match Clicky behavior)
+            if !isCursorScreen && sortedDisplays.count > 1 { continue }
 
             do {
-                let filter = SCContentFilter(
-                    display: display,
-                    excludingWindows: excludedWindows
-                )
+                let filter = SCContentFilter(display: display, excludingWindows: excludedWindows)
 
-                // Use display.width/height directly for capture config.
-                // SCDisplay width/height are in points; SCStreamConfiguration interprets them as pixels.
-                // This gives us a 1x-point-resolution capture which is good for performance + Claude vision.
-                let captureW = Int(display.width)
-                let captureH = Int(display.height)
+                // Scale to maxCaptureDimension (e.g. 1280) maintaining aspect ratio.
+                // This is the coordinate space Claude will use for [POINT:] tags.
+                let aspectRatio = CGFloat(display.width) / CGFloat(display.height)
+                let captureW: Int
+                let captureH: Int
+                if display.width >= display.height {
+                    captureW = maxCaptureDimension
+                    captureH = Int(CGFloat(maxCaptureDimension) / aspectRatio)
+                } else {
+                    captureH = maxCaptureDimension
+                    captureW = Int(CGFloat(maxCaptureDimension) * aspectRatio)
+                }
 
                 let config = SCStreamConfiguration()
                 config.width = captureW
                 config.height = captureH
                 config.pixelFormat = kCVPixelFormatType_32BGRA
-                config.showsCursor = true   // Show cursor so Claude can see where the user is pointing
+                config.showsCursor = true
 
-                let image = try await SCScreenshotManager.captureImage(
+                let cgImage = try await SCScreenshotManager.captureImage(
                     contentFilter: filter,
                     configuration: config
                 )
 
-                // Draw a subtle circle around cursor to help Claude identify the focus point
-                let imageWithCursorHighlight = drawCursorHighlight(
-                    on: image,
+                let actualW = cgImage.width
+                let actualH = cgImage.height
+
+                // Draw cursor highlight circle on the image
+                let imageWithHighlight = drawCursorHighlight(
+                    on: cgImage,
                     cursorScreenPos: cgCursorPos,
-                    displayBounds: CGDisplayBounds(display.displayID)
+                    displayBounds: CGDisplayBounds(display.displayID),
+                    imageWidth: actualW,
+                    imageHeight: actualH
                 )
 
-                // If cursor-area-only mode, crop to a region around the cursor
+                // Optionally crop to cursor area
                 let finalImage: CGImage
                 if cursorAreaOnly {
                     finalImage = cropAroundCursor(
-                        image: imageWithCursorHighlight,
+                        image: imageWithHighlight,
                         cursorScreenPos: cgCursorPos,
                         displayBounds: CGDisplayBounds(display.displayID)
                     )
                 } else {
-                    finalImage = imageWithCursorHighlight
+                    finalImage = imageWithHighlight
                 }
 
-                let data = imageToJPEGData(finalImage) ?? Data()
+                let finalW = finalImage.width
+                let finalH = finalImage.height
 
-                // Use actual captured image dimensions (what Claude will see)
-                let actualW = finalImage.width
-                let actualH = finalImage.height
-
-                // Find the NSScreen for this display to get the screen frame
-                let screenFrame = NSScreen.screens.first(where: {
-                    ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID) == display.displayID
-                })?.frame ?? CGRect(x: 0, y: 0, width: CGFloat(display.width), height: CGFloat(display.height))
-
-                // Include actual pixel dimensions in the label so Claude knows the coordinate space
-                let labelWithDimensions = "\(label) (\(actualW)x\(actualH) pixels)"
+                guard let jpegData = NSBitmapImageRep(cgImage: finalImage)
+                    .representation(using: .jpeg, properties: [.compressionFactor: 0.8]) else {
+                    continue
+                }
 
                 // Compute cursor position in screenshot pixel space
                 let displayBounds = CGDisplayBounds(display.displayID)
-                let cursorInImageX = Int((cgCursorPos.x - displayBounds.origin.x) / displayBounds.width * CGFloat(actualW))
-                let cursorInImageY = Int((cgCursorPos.y - displayBounds.origin.y) / displayBounds.height * CGFloat(actualH))
-                print("[ScreenCapture] Cursor in image: (\(cursorInImageX), \(cursorInImageY)) — CG cursor \(cgCursorPos), displayBounds \(displayBounds), image \(actualW)x\(actualH)")
+                let cursorInImageX = Int((cgCursorPos.x - displayBounds.origin.x) / displayBounds.width * CGFloat(finalW))
+                let cursorInImageY = Int((cgCursorPos.y - displayBounds.origin.y) / displayBounds.height * CGFloat(finalH))
+
+                // Build label with actual pixel dimensions so Claude knows the coordinate space
+                let screenLabel: String
+                if sortedDisplays.count == 1 {
+                    screenLabel = "user's screen (image dimensions: \(finalW)x\(finalH) pixels)"
+                } else if isCursorScreen {
+                    screenLabel = "screen \(displayIndex + 1) of \(sortedDisplays.count) — primary focus (image dimensions: \(finalW)x\(finalH) pixels)"
+                } else {
+                    screenLabel = "screen \(displayIndex + 1) of \(sortedDisplays.count) — secondary (image dimensions: \(finalW)x\(finalH) pixels)"
+                }
 
                 let capture = ScreenCapture(
-                    imageData: data,
-                    label: labelWithDimensions,
-                    cgImage: image,
-                    screenFrame: screenFrame,
-                    captureWidth: actualW,
-                    captureHeight: actualH,
+                    imageData: jpegData,
+                    label: screenLabel,
+                    cgImage: finalImage,
+                    screenFrame: displayFrame,
+                    captureWidth: finalW,
+                    captureHeight: finalH,
+                    displayWidthInPoints: Int(displayFrame.width),
+                    displayHeightInPoints: Int(displayFrame.height),
+                    isCursorScreen: isCursorScreen,
                     cursorInImageX: cursorInImageX,
                     cursorInImageY: cursorInImageY
                 )
                 captures.append(capture)
 
-                print("[ScreenCapture] Captured display \(display.displayID) as '\(label)'")
+                print("[ScreenCapture] Captured display \(display.displayID): \(finalW)x\(finalH)px screenshot, \(Int(displayFrame.width))x\(Int(displayFrame.height))pt display")
             } catch {
                 print("[ScreenCapture] Failed to capture display \(display.displayID): \(error)")
             }
@@ -205,22 +262,17 @@ class CompanionScreenCapture {
 
     // MARK: - Cursor Area Cropping
 
-    /// Crops the screenshot to an 800x600 region centered on the cursor.
-    /// If the cursor is near an edge, the crop shifts to stay within bounds.
     private func cropAroundCursor(image: CGImage, cursorScreenPos: CGPoint, displayBounds: CGRect) -> CGImage {
         let cropWidth = 800
         let cropHeight = 600
         let imageW = image.width
         let imageH = image.height
 
-        // Convert cursor screen position to image pixel coordinates
         let cursorPixelX = Int((cursorScreenPos.x - displayBounds.origin.x) / displayBounds.width * CGFloat(imageW))
         let cursorPixelY = Int((cursorScreenPos.y - displayBounds.origin.y) / displayBounds.height * CGFloat(imageH))
 
-        // If the image is smaller than the crop size, skip cropping
         guard imageW > cropWidth && imageH > cropHeight else { return image }
 
-        // Center the crop on the cursor, clamping to image bounds
         var originX = cursorPixelX - cropWidth / 2
         var originY = cursorPixelY - cropHeight / 2
         originX = max(0, min(originX, imageW - cropWidth))
@@ -228,82 +280,16 @@ class CompanionScreenCapture {
 
         let cropRect = CGRect(x: originX, y: originY, width: cropWidth, height: cropHeight)
         guard let cropped = image.cropping(to: cropRect) else { return image }
-
-        print("[ScreenCapture] Cursor-area crop: \(imageW)x\(imageH) → \(cropWidth)x\(cropHeight) at (\(originX), \(originY))")
         return cropped
     }
 
-    // MARK: - Helpers
+    // MARK: - Cursor Highlight
 
-    /// Determine which display contains the cursor using CoreGraphics (reliable across multi-monitor)
-    private func displayContainingCursor(displays: [SCDisplay], cursorLocation: NSPoint) -> CGDirectDisplayID {
-        // Use CGEvent to get cursor position in CG coordinates (top-left origin, pixels)
-        // This is the most reliable method across all monitor configurations
-        let cgCursorPos = CGEvent(source: nil)?.location ?? .zero
-
-        // Ask CG which display contains that point
-        var matchingDisplays = [CGDirectDisplayID](repeating: 0, count: 1)
-        var displayCount: UInt32 = 0
-        let err = CGGetDisplaysWithPoint(cgCursorPos, 1, &matchingDisplays, &displayCount)
-
-        if err == .success, displayCount > 0 {
-            let foundID = matchingDisplays[0]
-            print("[ScreenCapture] Cursor at CG \(cgCursorPos) → display \(foundID)")
-            // Verify this display is in our SCDisplay list
-            if displays.contains(where: { $0.displayID == foundID }) {
-                return foundID
-            }
-        }
-
-        print("[ScreenCapture] ⚠️ CGGetDisplaysWithPoint failed (cursor \(cgCursorPos)), falling back to main display")
-        return CGMainDisplayID()
-    }
-
-    /// Build list of windows to exclude from capture
-    private func buildExcludedWindows(from windows: [SCWindow]) -> [SCWindow] {
-        var excluded: [SCWindow] = []
-
-        if let panelToExclude = floatingButtonWindowToExcludeFromCaptures {
-            let panelWindowNumber = panelToExclude.windowNumber
-            for window in windows {
-                if window.windowID == CGWindowID(panelWindowNumber) {
-                    excluded.append(window)
-                    break
-                }
-            }
-        }
-
-        // Also exclude our own app windows
-        let bundleID = Bundle.main.bundleIdentifier ?? ""
-        if !bundleID.isEmpty {
-            for window in windows {
-                if window.owningApplication?.bundleIdentifier == bundleID {
-                    excluded.append(window)
-                }
-            }
-        }
-
-        return excluded
-    }
-
-    /// Convert CGImage to JPEG data
-    private func imageToJPEGData(_ image: CGImage) -> Data? {
-        let bitmapRep = NSBitmapImageRep(cgImage: image)
-        return bitmapRep.representation(
-            using: .jpeg,
-            properties: [.compressionFactor: 0.5]
-        )
-    }
-    
-    /// Draw a subtle highlight circle around the cursor position to help Claude identify focus
-    private func drawCursorHighlight(on image: CGImage, cursorScreenPos: CGPoint, displayBounds: CGRect) -> CGImage {
-        let width = image.width
-        let height = image.height
-
+    private func drawCursorHighlight(on image: CGImage, cursorScreenPos: CGPoint, displayBounds: CGRect, imageWidth: Int, imageHeight: Int) -> CGImage {
         guard let context = CGContext(
             data: nil,
-            width: width,
-            height: height,
+            width: imageWidth,
+            height: imageHeight,
             bitsPerComponent: 8,
             bytesPerRow: 0,
             space: CGColorSpaceCreateDeviceRGB(),
@@ -312,52 +298,32 @@ class CompanionScreenCapture {
             return image
         }
 
-        // CGContext has y=0 at bottom by default, but CGEvent cursor coordinates have y=0 at top.
-        // Flip the context so drawing coordinates match CG global space (y increases downward).
-        // This ensures the image is stored right-side-up AND the cursor circle lands at the correct pixel.
-        context.translateBy(x: 0, y: CGFloat(height))
+        context.translateBy(x: 0, y: CGFloat(imageHeight))
         context.scaleBy(x: 1.0, y: -1.0)
+        context.draw(image, in: CGRect(x: 0, y: 0, width: imageWidth, height: imageHeight))
 
-        // Draw the original image (appears correctly oriented after the flip)
-        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        let cursorX = (cursorScreenPos.x - displayBounds.origin.x) / displayBounds.width * CGFloat(imageWidth)
+        let cursorY = (cursorScreenPos.y - displayBounds.origin.y) / displayBounds.height * CGFloat(imageHeight)
 
-        // Cursor position in image pixel coordinates.
-        // cursorScreenPos uses CG global coords (y from top), which now matches our flipped context.
-        let cursorX = (cursorScreenPos.x - displayBounds.origin.x) / displayBounds.width * CGFloat(width)
-        let cursorY = (cursorScreenPos.y - displayBounds.origin.y) / displayBounds.height * CGFloat(height)
-
-        // Draw a circle around cursor (red with alpha)
+        // Inner circle
         context.setStrokeColor(red: 1.0, green: 0.2, blue: 0.2, alpha: 0.8)
         context.setLineWidth(3.0)
-
         let innerRadius: CGFloat = 20
+        context.strokeEllipse(in: CGRect(x: cursorX - innerRadius, y: cursorY - innerRadius, width: innerRadius * 2, height: innerRadius * 2))
+
+        // Outer circle
         let outerRadius: CGFloat = 35
-
-        context.strokeEllipse(in: CGRect(
-            x: cursorX - innerRadius,
-            y: cursorY - innerRadius,
-            width: innerRadius * 2,
-            height: innerRadius * 2
-        ))
-
         context.setStrokeColor(red: 1.0, green: 0.2, blue: 0.2, alpha: 0.4)
         context.setLineWidth(2.0)
-        context.strokeEllipse(in: CGRect(
-            x: cursorX - outerRadius,
-            y: cursorY - outerRadius,
-            width: outerRadius * 2,
-            height: outerRadius * 2
-        ))
+        context.strokeEllipse(in: CGRect(x: cursorX - outerRadius, y: cursorY - outerRadius, width: outerRadius * 2, height: outerRadius * 2))
 
-        // Draw crosshair for precision
+        // Crosshair
         context.setStrokeColor(red: 1.0, green: 0.2, blue: 0.2, alpha: 0.6)
         context.setLineWidth(1.5)
         let crosshairLength: CGFloat = 15
-
         context.move(to: CGPoint(x: cursorX - crosshairLength, y: cursorY))
         context.addLine(to: CGPoint(x: cursorX + crosshairLength, y: cursorY))
         context.strokePath()
-
         context.move(to: CGPoint(x: cursorX, y: cursorY - crosshairLength))
         context.addLine(to: CGPoint(x: cursorX, y: cursorY + crosshairLength))
         context.strokePath()
