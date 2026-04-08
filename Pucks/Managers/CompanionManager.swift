@@ -17,11 +17,15 @@ struct ConversationTurn: Identifiable, Codable {
     let id: UUID
     let userTranscript: String
     let assistantResponse: String
+    let timestamp: Date
+    let modelName: String
 
-    init(userTranscript: String, assistantResponse: String) {
+    init(userTranscript: String, assistantResponse: String, modelName: String = "Claude Sonnet 4") {
         self.id = UUID()
         self.userTranscript = userTranscript
         self.assistantResponse = assistantResponse
+        self.timestamp = Date()
+        self.modelName = modelName
     }
 }
 
@@ -32,7 +36,9 @@ class CompanionManager: ObservableObject {
 
     // MARK: - Published Properties
 
-    @Published var conversationHistory: [ConversationTurn] = []
+    @Published var conversationHistory: [ConversationTurn] = [] {
+        didSet { persistConversation() }
+    }
     @Published var isRecordingFromKeyboardShortcut: Bool = false
     @Published var isRecordingFromMicrophoneButton: Bool = false
     @Published var activeTurnTranscriptText: String = ""
@@ -45,6 +51,37 @@ class CompanionManager: ObservableObject {
                 voiceStateObservable?.clearAudioLevels()
             }
         }
+    }
+
+    // MARK: - Initializer
+
+    init() {
+        // Restore persisted conversation history
+        if let data = UserDefaults.standard.data(forKey: "conversationHistory"),
+           let history = try? JSONDecoder().decode([ConversationTurn].self, from: data) {
+            self.conversationHistory = history
+            print("[CompanionManager] Restored \(history.count) conversation turn(s) from previous session.")
+        }
+    }
+
+    // MARK: - Screenshot Interceptor
+
+    lazy var screenshotInterceptor: ScreenshotInterceptor = {
+        ScreenshotInterceptor()
+    }()
+
+    /// Screenshots the user has explicitly added to the next chat turn
+    @Published var attachedScreenshots: [CapturedScreenshot] = []
+
+    func attachPendingScreenshot() {
+        guard let screenshot = screenshotInterceptor.pendingScreenshot else { return }
+        attachedScreenshots.append(screenshot)
+        screenshotInterceptor.dismiss()
+        print("[CompanionManager] Screenshot attached to chat (\(attachedScreenshots.count) total).")
+    }
+
+    func removeAttachedScreenshot(_ id: UUID) {
+        attachedScreenshots.removeAll { $0.id == id }
     }
 
     // MARK: - Sub-Managers (set by AppDelegate)
@@ -287,8 +324,20 @@ class CompanionManager: ObservableObject {
             
             allMessages.append(ClaudeAPI.Message(role: "user", content: userText))
 
-            let screenshotBase64s = base64Images.map { $0.base64 }
-            let screenLabels = base64Images.map { $0.label }
+            var screenshotBase64s = base64Images.map { $0.base64 }
+            var screenLabels = base64Images.map { $0.label }
+
+            // Include user-attached screenshots
+            for (index, attached) in attachedScreenshots.enumerated() {
+                screenshotBase64s.append(attached.base64JPEG)
+                screenLabels.append("user-attached screenshot \(index + 1) (\(attached.source.rawValue))")
+            }
+            if !attachedScreenshots.isEmpty {
+                print("[CompanionManager] Including \(attachedScreenshots.count) user-attached screenshot(s).")
+                userText += "\n[The user has attached \(attachedScreenshots.count) screenshot(s) to this message. Refer to them if relevant.]"
+            }
+            // Clear attached screenshots after use
+            attachedScreenshots.removeAll()
 
             let responseStream = claudeAPI.sendMessage(
                 messages: allMessages,
@@ -426,6 +475,15 @@ class CompanionManager: ObservableObject {
         activeTurnOrder = 0
         serverContext = ""
         voiceState = .idle
+        // didSet on conversationHistory persists the empty array
         print("[CompanionManager] Conversation cleared.")
+    }
+
+    // MARK: - Conversation Persistence
+
+    private func persistConversation() {
+        if let data = try? JSONEncoder().encode(conversationHistory) {
+            UserDefaults.standard.set(data, forKey: "conversationHistory")
+        }
     }
 }

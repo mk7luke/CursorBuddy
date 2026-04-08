@@ -54,43 +54,22 @@ struct CursorOverlayView: View {
                     voiceState.state != .listening &&
                     voiceState.state != .thinking &&
                     selectedTextMonitor.hasSelection {
-                    VStack(alignment: .leading, spacing: 8) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack(spacing: 8) {
-                                Image(systemName: "sparkles.rectangle.stack")
-                                    .font(.system(size: 12, weight: .semibold))
-                                Text("Suggest")
-                                    .font(.system(size: 12, weight: .semibold, design: .rounded))
-                            }
-                            Text("Use \(shortcutConfig.label)")
-                                .font(.system(size: 10, weight: .medium, design: .rounded))
-                                .foregroundColor(.white.opacity(0.72))
-                        }
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background {
-                            Capsule()
-                                .fill(Color.blue.opacity(0.15))
-                                .glassEffect(.regular)
-                        }
-
-                        Text(selectionPreviewText)
-                            .font(.system(size: 12, weight: .medium, design: .rounded))
-                            .foregroundColor(.white.opacity(0.92))
-                            .lineLimit(3)
-                            .multilineTextAlignment(.leading)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 10)
-                            .frame(maxWidth: 220, alignment: .leading)
-                            .background {
-                                RoundedRectangle(cornerRadius: 14)
-                                    .fill(.clear)
-                                    .glassEffect(.regular)
-                            }
+                    HStack(spacing: 6) {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 11, weight: .semibold))
+                        Text("Hold \(shortcutConfig.label) and speak")
+                            .font(.system(size: 11, weight: .medium, design: .rounded))
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
+                    .background {
+                        Capsule()
+                            .fill(Color.blue.opacity(0.15))
+                            .glassEffect(.regular)
                     }
                     .shadow(color: .black.opacity(0.25), radius: 10, x: 0, y: 4)
-                    .position(x: pos.x + 118, y: pos.y + 22)
+                    .position(x: pos.x + 90, y: pos.y + 12)
                 } else if voiceState.state != .listening && voiceState.state != .thinking {
                     let cursorW: CGFloat = 20
                     let cursorH: CGFloat = 28
@@ -135,19 +114,6 @@ struct CursorOverlayView: View {
 }
 
 private extension CursorOverlayView {
-    var selectionPreviewText: String {
-        let normalized = selectedTextMonitor.selectedText
-            .replacingOccurrences(of: "\n", with: " ")
-            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-
-        if normalized.count > 120 {
-            return "\"\(normalized.prefix(117))...\""
-        }
-
-        return "\"\(normalized)\""
-    }
-
     var cursorAnchorSize: CGSize {
         switch cursorAppearance.style {
         case .arrow:

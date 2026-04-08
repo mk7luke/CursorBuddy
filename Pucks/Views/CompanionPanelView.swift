@@ -4,6 +4,22 @@ import AVFoundation
 import Speech
 import Carbon
 
+// MARK: - Panel Tab
+
+enum PanelTab: String, CaseIterable, Identifiable {
+    case chat = "Chat"
+    case settings = "Settings"
+
+    var id: String { rawValue }
+
+    var icon: String {
+        switch self {
+        case .chat: return "bubble.left.and.bubble.right"
+        case .settings: return "gearshape"
+        }
+    }
+}
+
 // MARK: - CompanionPanelView
 
 struct CompanionPanelView: View {
@@ -14,37 +30,34 @@ struct CompanionPanelView: View {
 
     // MARK: - State
 
-    @State private var isMainWindowCurrentlyFocused: Bool = true
-    @State private var showWelcome: Bool = false
-    @State private var showOnboardingVideo: Bool = false
-    @State private var showOnboardingPrompt: Bool = false
-    @State private var onboardingPromptText: String = ""
-    @State private var onboardingPromptOpacity: Double = 0.0
-    @State private var welcomeText: String = ""
-    @State private var isShowingSettings: Bool = false
+    @State private var selectedTab: PanelTab = .chat
     @State private var isCapturingShortcut: Bool = false
     @State private var shortcutEventMonitor: Any?
     @State private var screenPermissionPollTask: Task<Void, Never>?
+    @State private var showDebugSelectedText: Bool = UserDefaults.standard.bool(forKey: "showDebugSelectedText")
+    @State private var isMainWindowCurrentlyFocused: Bool = true
 
     // Permission states
     @State private var hasMicrophonePermission: Bool = false
     @State private var hasScreenRecordingPermission: Bool = false
     @State private var hasAccessibilityPermission: Bool = false
     @State private var hasSpeechRecognitionPermission: Bool = false
+
     @StateObject private var shortcutConfig = PushToTalkShortcutConfiguration.shared
     @StateObject private var cursorConfig = CursorAppearanceConfiguration.shared
+    @ObservedObject private var pinState = PanelPinState.shared
 
     // Onboarding
     @State private var hasCompletedOnboarding: Bool = false
-    @State private var isSessionRunning: Bool = false
+    @State private var welcomeText: String = ""
+    @State private var showWelcome: Bool = false
 
     // MARK: - Constants
 
     private let fullWelcomeText = "You're all set. Hit Start to meet Pucks."
-    private let privacyNote = "Nothing runs in the background. Pucks will only take a screenshot when you press the hot key. So, you can give that permission in peace. If you are still sus, eh, I can't do much there champ."
-    private let muxHLSURL = "https://stream.mux.com/e5jB8UuSrtFABVnTHCR7k3sIsmcUHCyhtLu1tzqLlfs.m3u8"
-    private let messageMaxWidth: CGFloat = 248
-    private let surfaceCornerRadius: CGFloat = 14
+    private let privacyNote = "Nothing runs in the background. Pucks only takes a screenshot when you press the hotkey."
+    private let messageMaxWidth: CGFloat = 260
+    private let surfaceCornerRadius: CGFloat = 12
     private let accentColor = Color(red: 0.34, green: 0.63, blue: 0.98)
 
     // MARK: - Computed
@@ -53,42 +66,44 @@ struct CompanionPanelView: View {
         hasMicrophonePermission && hasScreenRecordingPermission && hasAccessibilityPermission && hasSpeechRecognitionPermission
     }
 
-    private var somePermissionsRevoked: Bool {
-        hasCompletedOnboarding && !allPermissionsGranted
-    }
-
-    private var missingRequiredPermissions: Bool {
-        !allPermissionsGranted
-    }
-
     // MARK: - Body
 
+    @State private var isCompact: Bool = false
+
     var body: some View {
-        GlassEffectContainer(spacing: 18) {
-            ZStack {
-                Color.white.opacity(0.015)
-                    .ignoresSafeArea()
+        GlassEffectContainer(spacing: 0) {
+            VStack(spacing: 0) {
+                if !isCompact {
+                    panelHeader
+                }
 
-                VStack(spacing: 0) {
-                    dragHeaderView
-
-                    if !hasCompletedOnboarding {
-                        onboardingView
-                    } else {
-                        mainSessionView
+                if !hasCompletedOnboarding {
+                    onboardingView
+                        .onAppear { requestPanelResize(height: 520) }
+                } else if isCompact && selectedTab == .chat && allPermissionsGranted {
+                    chatTabView
+                } else {
+                    Group {
+                        switch selectedTab {
+                        case .chat:
+                            chatTabView
+                        case .settings:
+                            settingsTabView
+                                .onAppear { requestPanelResize(height: 560) }
+                        }
                     }
+                    .transition(.opacity.animation(.easeInOut(duration: 0.15)))
                 }
             }
         }
         .preferredColorScheme(.dark)
         .onAppear {
-            checkAllPermissions()
-            configureFloatingButtonManager()
-            startObservingMainWindowFocusChanges()
-
             if UserDefaults.standard.bool(forKey: "hasCompletedOnboarding") {
                 hasCompletedOnboarding = true
             }
+            checkAllPermissions()
+            configureFloatingButtonManager()
+            startObservingMainWindowFocusChanges()
         }
         .onDisappear {
             stopShortcutCapture()
@@ -96,432 +111,399 @@ struct CompanionPanelView: View {
         }
     }
 
-    // MARK: - Onboarding View
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // MARK: - Panel Header
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-    private var onboardingView: some View {
-        VStack(spacing: 20) {
-            if showOnboardingVideo {
-                onboardingVideoSection
-            } else if showWelcome {
-                welcomeSection
-            } else {
-                permissionsSection
+    private var panelHeader: some View {
+        HStack(spacing: 6) {
+            // Status chip
+            HStack(spacing: 5) {
+                Circle()
+                    .fill(voiceStateColor)
+                    .frame(width: 7, height: 7)
+                Text(voiceStateLabel)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.white.opacity(0.7))
             }
-        }
-        .padding(24)
-    }
-
-    private var onboardingVideoSection: some View {
-        VStack(spacing: 16) {
-            OnboardingVideoPlayerView(
-                hlsURL: muxHLSURL,
-                onVideoEnded: {
-                    skipOnboardingVideo()
-                }
-            )
-            .frame(width: onboardingVideoPlayerWidth, height: onboardingVideoPlayerHeight)
-            .cornerRadius(12)
-            .shadow(color: .black.opacity(0.3), radius: 8, y: 4)
-
-            Text("Meet Pucks")
-                .font(.headline)
-                .foregroundColor(.white.opacity(0.7))
-
-            Button(action: { skipOnboardingVideo() }) {
-                Text("Skip")
-                    .font(.system(size: 13, weight: .medium))
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 6)
-            }
-            .buttonStyle(.glass)
-        }
-    }
-
-    private func skipOnboardingVideo() {
-        withAnimation(.easeInOut(duration: 0.5)) {
-            showOnboardingVideo = false
-            showWelcome = true
-        }
-        animateWelcomeText()
-    }
-
-    private var welcomeSection: some View {
-        VStack(spacing: 24) {
-            Image(systemName: "hand.wave.fill")
-                .font(.system(size: 44))
-                .foregroundColor(.blue)
-
-            Text(welcomeText)
-                .font(.title2)
-                .fontWeight(.medium)
-                .foregroundColor(.white)
-                .multilineTextAlignment(.center)
-                .animation(.easeIn, value: welcomeText)
-
-            Text(privacyNote)
-                .font(.caption)
-                .foregroundColor(.white.opacity(0.5))
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 12)
-
-            Button(action: {
-                hasCompletedOnboarding = true
-                UserDefaults.standard.set(true, forKey: "hasCompletedOnboarding")
-            }) {
-                Text("Start")
-                    .font(.headline)
-                    .foregroundColor(.white)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
-            }
-            .buttonStyle(.glassProminent)
-            .tint(allPermissionsGranted ? .blue : .gray)
-            .disabled(!allPermissionsGranted)
-        }
-    }
-
-    private var permissionsSection: some View {
-        VStack(spacing: 20) {
-            Text("Pucks needs a few permissions")
-                .font(.title3)
-                .fontWeight(.semibold)
-                .foregroundColor(.white)
-
-            VStack(spacing: 12) {
-                permissionRow(
-                    title: "Microphone",
-                    icon: "mic.fill",
-                    granted: hasMicrophonePermission,
-                    action: requestMicrophonePermission
-                )
-                permissionRow(
-                    title: "Screen Recording",
-                    icon: "rectangle.dashed.badge.record",
-                    granted: hasScreenRecordingPermission,
-                    action: requestScreenRecordingPermission
-                )
-                permissionRow(
-                    title: "Accessibility",
-                    icon: "accessibility",
-                    granted: hasAccessibilityPermission,
-                    action: requestAccessibilityPermission
-                )
-                permissionRow(
-                    title: "Speech Recognition",
-                    icon: "waveform",
-                    granted: hasSpeechRecognitionPermission,
-                    action: requestSpeechRecognitionPermission
-                )
-            }
-
-            Text(privacyNote)
-                .font(.caption)
-                .foregroundColor(.white.opacity(0.5))
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 8)
-
-            Text("Screen Recording is granted to the currently running build. If macOS does not show the dialog, use the Grant button to open the correct Settings pane for this build.")
-                .font(.caption)
-                .foregroundColor(.white.opacity(0.45))
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 8)
-
-            if allPermissionsGranted {
-                Button(action: {
-                    // Skip video, go straight to welcome/start
-                    withAnimation(.easeInOut(duration: 0.4)) {
-                        showWelcome = true
-                    }
-                    animateWelcomeText()
-                }) {
-                    Text("Continue")
-                        .font(.headline)
-                        .foregroundColor(.white)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
-                }
-                .buttonStyle(.glassProminent)
-                .tint(.blue)
-                .transition(.opacity)
-            }
-        }
-    }
-
-    // MARK: - Main Session View
-
-    private var mainSessionView: some View {
-        VStack(spacing: 0) {
-            sessionHeader
-                .padding(.top, 12)
-
-            if missingRequiredPermissions {
-                mainPermissionsCard
-            }
-
-            if selectedTextMonitor.hasSelection {
-                selectedTextCard
-            }
-
-            conversationSection
-                .frame(maxHeight: .infinity)
-
-            if companionManager.voiceState == .thinking {
-                thinkingIndicator
-            }
-
-            if isShowingSettings {
-                utilitySectionHeader
-                shortcutSettingsView
-                cursorSettingsView
-            }
-
-            microphoneSection
-                .padding(.bottom, 16)
-        }
-        .padding(.horizontal, 16)
-        .padding(.top, 6)
-    }
-
-    private var dragHeaderView: some View {
-        HStack(spacing: 10) {
-            Capsule()
-                .fill(Color.white.opacity(0.22))
-                .frame(width: 40, height: 5)
-
-            Text("Drag here. Resize from any edge or corner.")
-                .font(.caption)
-                .foregroundColor(.white.opacity(0.55))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .glassEffect(.regular.tint(.white.opacity(0.04)), in: .capsule)
 
             Spacer()
-        }
-        .padding(.horizontal, 16)
-        .padding(.top, 28)
-        .padding(.bottom, 10)
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(Color.white.opacity(0.06))
-                .frame(height: 1)
-        }
-    }
 
-    private var sessionHeader: some View {
-        HStack(alignment: .top, spacing: 12) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Pucks")
-                    .font(.system(size: 20, weight: .semibold, design: .rounded))
-                    .foregroundColor(.white)
-
-                Text(headerSubtitle)
-                    .font(.caption)
-                    .foregroundColor(.white.opacity(0.55))
-                    .lineLimit(2)
+            HStack(spacing: 2) {
+                ForEach(PanelTab.allCases) { tab in
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.15)) {
+                            selectedTab = tab
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: tab.icon)
+                                .font(.system(size: 10))
+                            Text(tab.rawValue)
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        .foregroundColor(selectedTab == tab ? .white : .white.opacity(0.4))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background {
+                            if selectedTab == tab {
+                                Capsule()
+                                    .fill(.white.opacity(0.12))
+                            }
+                        }
+                        .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
             }
 
-            Spacer(minLength: 12)
+            Spacer()
 
-            HStack(spacing: 8) {
-                voiceStateBadge
+            // Pin button
+            Button {
+                pinState.isPinned.toggle()
+            } label: {
+                Image(systemName: pinState.isPinned ? "pin.fill" : "pin")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(pinState.isPinned ? accentColor : .white.opacity(0.45))
+                    .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(pinState.isPinned ? "Unpin panel" : "Pin panel open")
 
-                Button {
-                    isShowingSettings.toggle()
-                } label: {
-                    Image(systemName: isShowingSettings ? "xmark.circle.fill" : "slider.horizontal.3")
-                        .font(.system(size: 14, weight: .semibold))
-                        .frame(width: 30, height: 30)
-                }
-                .buttonStyle(.glass)
-
+            // Quit button (hidden when pinned)
+            if !pinState.isPinned {
                 Button {
                     NSApplication.shared.terminate(nil)
                 } label: {
-                    Image(systemName: "power")
-                        .font(.system(size: 14, weight: .semibold))
-                        .frame(width: 30, height: 30)
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(.white.opacity(0.5))
+                        .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
                 }
-                .buttonStyle(.glass)
+                .buttonStyle(.plain)
+                .help("Quit Pucks")
             }
-        }
-    }
-
-    private var voiceStateBadge: some View {
-        HStack(spacing: 8) {
-            Circle()
-                .fill(voiceStateColor)
-                .frame(width: 8, height: 8)
-
-            Text(voiceStateLabel)
-                .font(.caption)
-                .foregroundColor(.white.opacity(0.78))
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .glassEffect(.regular.tint(.white.opacity(0.06)), in: .capsule)
+        .padding(.top, 4)
+        .padding(.bottom, 2)
+        .background(WindowDragArea())
     }
 
-    private var selectedTextCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Label("Selected Text", systemImage: "text.cursor")
-                    .font(.subheadline)
-                    .foregroundColor(.white.opacity(0.8))
-                Spacer()
-                Button("Suggest Rewrite") {
-                    companionManager.suggestForSelectedText()
-                }
-                .buttonStyle(.glass)
-                .controlSize(.small)
-                .disabled(companionManager.voiceState == .thinking || companionManager.voiceState == .listening)
-            }
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // MARK: - Chat Tab
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-            Text(selectedTextPreview)
-                .font(.system(size: 12, weight: .medium, design: .rounded))
-                .foregroundColor(.white.opacity(0.88))
-                .lineLimit(4)
-                .multilineTextAlignment(.leading)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(12)
-        .glassEffect(.regular.tint(.white.opacity(0.045)), in: .rect(cornerRadius: surfaceCornerRadius))
-        .padding(.top, 8)
-    }
+    /// Threshold height below which we switch to compact horizontal layout
+    private let compactHeightThreshold: CGFloat = 220
 
-    private var mainPermissionsCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 10) {
-                Image(systemName: "lock.shield.fill")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(.orange)
-
-                Text("Permissions Required")
-                    .font(.subheadline)
-                    .foregroundColor(.white.opacity(0.9))
-
-                Spacer()
-
-                Button {
-                    checkAllPermissions()
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 12, weight: .semibold))
-                        .frame(width: 24, height: 24)
-                }
-                .buttonStyle(.glass)
-            }
-
-            Text("Pucks cannot record until the missing permissions below are granted.")
-                .font(.caption)
-                .foregroundColor(.white.opacity(0.55))
-
-            VStack(spacing: 8) {
-                if !hasMicrophonePermission {
-                    permissionRow(
-                        title: "Microphone",
-                        icon: "mic.fill",
-                        granted: false,
-                        action: requestMicrophonePermission
-                    )
-                }
-
-                if !hasScreenRecordingPermission {
-                    permissionRow(
-                        title: "Screen Recording",
-                        icon: "rectangle.dashed.badge.record",
-                        granted: false,
-                        action: requestScreenRecordingPermission
-                    )
-                }
-
-                if !hasAccessibilityPermission {
-                    permissionRow(
-                        title: "Accessibility",
-                        icon: "accessibility",
-                        granted: false,
-                        action: requestAccessibilityPermission
-                    )
-                }
-
-                if !hasSpeechRecognitionPermission {
-                    permissionRow(
-                        title: "Speech Recognition",
-                        icon: "waveform",
-                        granted: false,
-                        action: requestSpeechRecognitionPermission
-                    )
-                }
+    private var chatTabView: some View {
+        GeometryReader { geo in
+            if geo.size.height < compactHeightThreshold {
+                compactChatLayout
+                    .onAppear { isCompact = true }
+                    .onChange(of: geo.size.height) { _, h in
+                        isCompact = h < compactHeightThreshold
+                    }
+            } else {
+                fullChatLayout
+                    .onAppear { isCompact = false }
+                    .onChange(of: geo.size.height) { _, h in
+                        isCompact = h < compactHeightThreshold
+                    }
             }
         }
-        .padding(12)
-        .glassEffect(.regular.tint(.white.opacity(0.045)), in: .rect(cornerRadius: surfaceCornerRadius))
-        .padding(.top, 8)
     }
 
-    private var voiceStateColor: Color {
-        switch companionManager.voiceState {
-        case .idle: return .white.opacity(0.45)
-        case .listening: return accentColor
-        case .thinking: return .white.opacity(0.7)
-        case .speaking: return .white.opacity(0.7)
-        }
-    }
+    // MARK: Full (tall) chat layout
 
-    private var voiceStateLabel: String {
-        switch companionManager.voiceState {
-        case .idle: return "Ready"
-        case .listening: return "Listening..."
-        case .thinking: return "Thinking..."
-        case .speaking: return "Speaking..."
-        }
-    }
+    private var fullChatLayout: some View {
+        VStack(spacing: 0) {
+            // Inline permission warning
+            if !allPermissionsGranted {
+                permissionsWarningBanner
+                    .padding(.horizontal, 12)
+                    .padding(.top, 6)
+            }
 
-    private var conversationSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label("Conversation", systemImage: "bubble.left.and.bubble.right")
-                .font(.subheadline)
-                .foregroundColor(.white.opacity(0.82))
+            // Selected text card
+            if selectedTextMonitor.hasSelection {
+                selectedTextCard
+                    .padding(.horizontal, 12)
+                    .padding(.top, 6)
+            }
 
-            conversationHistoryView
-                .frame(maxHeight: .infinity)
+            // Debug selected text
+            if showDebugSelectedText && selectedTextMonitor.hasSelection {
+                debugSelectedTextView
+                    .padding(.horizontal, 12)
+                    .padding(.top, 4)
+            }
 
+            // Conversation area (expands to fill)
+            conversationSection
+                .padding(.horizontal, 12)
+                .padding(.top, 4)
+
+            // Thinking indicator
+            if companionManager.voiceState == .thinking {
+                thinkingIndicator
+                    .padding(.horizontal, 12)
+                    .padding(.top, 4)
+            }
+
+            // Active transcript
             if !companionManager.activeTurnTranscriptText.isEmpty {
                 activeTranscriptView
+                    .padding(.horizontal, 12)
+                    .padding(.top, 4)
             }
+
+            // Intercepted screenshot
+            if companionManager.screenshotInterceptor.pendingScreenshot != nil {
+                screenshotInterceptCard
+                    .padding(.horizontal, 12)
+                    .padding(.top, 4)
+            }
+
+            // Attached screenshots
+            if !companionManager.attachedScreenshots.isEmpty {
+                attachedScreenshotsRow
+                    .padding(.horizontal, 12)
+                    .padding(.top, 4)
+            }
+
+            // Microphone controls
+            microphoneSection
+                .padding(.horizontal, 12)
+                .padding(.top, 6)
+                .padding(.bottom, 10)
         }
-        .padding(12)
-        .glassEffect(.regular.tint(.white.opacity(0.03)), in: .rect(cornerRadius: surfaceCornerRadius))
-        .padding(.top, 8)
     }
 
-    private var conversationHistoryView: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 12) {
-                    if companionManager.conversationHistory.isEmpty {
-                        Text("Start a session and the conversation will appear here.")
-                            .font(.caption)
+    // MARK: Compact (short/wide) chat layout
+
+    private var compactChatLayout: some View {
+        HStack(spacing: 10) {
+            // Mic button — smaller, left side
+            Button(action: toggleRecording) {
+                Image(systemName: companionManager.voiceState == .listening ? "stop.fill" : "mic.fill")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(.white)
+                    .frame(width: 40, height: 40)
+                    .background {
+                        Circle()
+                            .fill(companionManager.voiceState == .listening ? Color.red : accentColor)
+                    }
+                    .glassEffect(.regular.tint(
+                        (companionManager.voiceState == .listening ? Color.red : accentColor).opacity(0.3)
+                    ), in: .circle)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .shadow(color: (companionManager.voiceState == .listening ? Color.red : accentColor).opacity(0.35), radius: 6, y: 2)
+            .disabled(companionManager.voiceState == .thinking || !allPermissionsGranted)
+            .opacity((companionManager.voiceState == .thinking || !allPermissionsGranted) ? 0.4 : 1.0)
+            .padding(.leading, 12)
+
+            // Conversation / transcript — right side
+            VStack(alignment: .leading, spacing: 4) {
+                // Status + shortcut row
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(voiceStateColor)
+                        .frame(width: 6, height: 6)
+                    Text(voiceStateLabel)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.white.opacity(0.5))
+                    Text(shortcutConfig.label)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.white.opacity(0.3))
+                }
+
+                // Content
+                if companionManager.voiceState == .thinking {
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .controlSize(.small)
+                            .tint(.white)
+                        Text("Thinking\u{2026}")
+                            .font(.system(size: 12))
                             .foregroundColor(.white.opacity(0.5))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.top, 4)
-                    } else {
-                        ForEach(companionManager.conversationHistory) { turn in
-                            VStack(alignment: .leading, spacing: 8) {
+                    }
+                } else if !companionManager.activeTurnTranscriptText.isEmpty {
+                    Text(companionManager.activeTurnTranscriptText)
+                        .font(.system(size: 12))
+                        .foregroundColor(.white.opacity(0.6))
+                        .italic()
+                        .lineLimit(3)
+                } else if let lastTurn = companionManager.conversationHistory.last {
+                    Text(lastTurn.assistantResponse)
+                        .font(.system(size: 12))
+                        .foregroundColor(.white)
+                        .lineLimit(3)
+                        .textSelection(.enabled)
+                } else {
+                    Text("Hold \(shortcutConfig.label) and speak")
+                        .font(.system(size: 12))
+                        .foregroundColor(.white.opacity(0.35))
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            .padding(.vertical, 8)
+            .padding(.trailing, 12)
+        }
+        .background(WindowDragArea())
+    }
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // MARK: - Settings Tab
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    private var settingsTabView: some View {
+        ScrollView {
+            VStack(spacing: 8) {
+                permissionsSettingsSection
+                shortcutSettingsSection
+                cursorSettingsSection
+                debugSettingsSection
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+        }
+        .scrollIndicators(.hidden)
+    }
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // MARK: - Chat: Permissions Warning
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    private var permissionsWarningBanner: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 12))
+                .foregroundColor(.orange)
+
+            Text("Missing permissions")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(.white.opacity(0.7))
+
+            Spacer()
+
+            Button {
+                requestPanelResize(height: 560)
+                withAnimation { selectedTab = .settings }
+            } label: {
+                Text("Fix")
+                    .font(.system(size: 11, weight: .semibold))
+            }
+            .buttonStyle(.glass)
+            .controlSize(.small)
+        }
+        .padding(10)
+        .glassEffect(.regular.tint(.orange.opacity(0.06)), in: .rect(cornerRadius: 10))
+    }
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // MARK: - Chat: Selected Text
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    private var selectedTextCard: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "text.cursor")
+                .font(.system(size: 12))
+                .foregroundColor(.white.opacity(0.7))
+
+            Text(selectedTextPreview)
+                .font(.system(size: 12))
+                .foregroundColor(.white.opacity(0.5))
+                .lineLimit(2)
+
+            Spacer(minLength: 4)
+
+            Button("Suggest") {
+                companionManager.suggestForSelectedText()
+            }
+            .font(.system(size: 11, weight: .semibold))
+            .buttonStyle(.glass)
+            .controlSize(.small)
+            .disabled(companionManager.voiceState == .thinking || companionManager.voiceState == .listening)
+        }
+        .padding(10)
+        .glassEffect(.regular.tint(.white.opacity(0.04)), in: .rect(cornerRadius: 10))
+    }
+
+    private var debugSelectedTextView: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 4) {
+                Image(systemName: "ladybug.fill")
+                    .font(.system(size: 9))
+                Text("Debug: Raw Selected Text")
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+            }
+            .foregroundColor(.orange.opacity(0.7))
+
+            Text(selectedTextMonitor.selectedText)
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundColor(.white.opacity(0.5))
+                .lineLimit(10)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(8)
+        .glassEffect(.regular.tint(.orange.opacity(0.04)), in: .rect(cornerRadius: 8))
+    }
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // MARK: - Chat: Conversation
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    private var conversationSection: some View {
+        VStack(spacing: 0) {
+            // Clear button
+            if !companionManager.conversationHistory.isEmpty {
+                HStack {
+                    Spacer()
+                    Button {
+                        companionManager.clearConversation()
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "arrow.counterclockwise")
+                                .font(.system(size: 9))
+                            Text("Clear")
+                                .font(.system(size: 10, weight: .medium))
+                        }
+                        .foregroundColor(.white.opacity(0.4))
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.bottom, 4)
+            }
+
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 10) {
+                        if companionManager.conversationHistory.isEmpty {
+                            emptyConversationPlaceholder
+                        } else {
+                            ForEach(companionManager.conversationHistory) { turn in
+                            VStack(spacing: 6) {
+                                // User message — right aligned
                                 HStack {
-                                    Spacer(minLength: 56)
-                                    messageBubble(
-                                        turn.userTranscript,
-                                        roleLabel: "You",
-                                        tint: accentColor.opacity(0.18),
-                                        alignment: .trailing
-                                    )
+                                    Spacer(minLength: 48)
+                                    messageBubble(turn.userTranscript, isUser: true)
                                 }
 
+                                // Assistant response — left aligned
                                 HStack {
-                                    messageBubble(
-                                        turn.assistantResponse,
-                                        roleLabel: "Pucks",
-                                        tint: .white.opacity(0.05),
-                                        alignment: .leading
-                                    )
-                                    Spacer(minLength: 56)
+                                    messageBubble(turn.assistantResponse, isUser: false)
+                                    Spacer(minLength: 48)
                                 }
                             }
                             .id(turn.id)
@@ -530,202 +512,418 @@ struct CompanionPanelView: View {
                 }
                 .padding(.vertical, 4)
             }
-            .scrollIndicators(.hidden)
-            .onChange(of: companionManager.conversationHistory.count) {
-                if let lastTurn = companionManager.conversationHistory.last {
-                    withAnimation {
-                        proxy.scrollTo(lastTurn.id, anchor: .bottom)
+                .scrollIndicators(.hidden)
+                .onChange(of: companionManager.conversationHistory.count) {
+                    if let last = companionManager.conversationHistory.last {
+                        withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
                     }
                 }
             }
         }
+        .frame(maxHeight: .infinity)
     }
 
-    private var microphoneSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text(primaryActionTitle)
-                    .font(.subheadline)
-                    .foregroundColor(.white.opacity(0.82))
+    private var emptyConversationPlaceholder: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "bubble.left.and.text.bubble.right")
+                .font(.system(size: 28))
+                .foregroundColor(.white.opacity(0.15))
 
-                Spacer()
-
-                if !missingRequiredPermissions {
-                    Text(shortcutConfig.label)
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundColor(.white.opacity(0.58))
-                }
-            }
-
-            Button(action: {
-                toggleRecording()
-            }) {
-                Label(
-                    companionManager.voiceState == .listening ? "Stop Listening" : "Start Listening",
-                    systemImage: companionManager.voiceState == .listening ? "stop.fill" : "mic.fill"
-                )
-                .font(.system(size: 14, weight: .semibold))
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 12)
-                .contentShape(.rect)
-            }
-            .buttonStyle(.glassProminent)
-            .tint(accentColor)
-            .disabled(companionManager.voiceState == .thinking)
-            .opacity(companionManager.voiceState == .thinking ? 0.5 : 1.0)
-
-            Text(primaryActionCaption)
-                .font(.caption)
+            Text("Hold \(shortcutConfig.label) and speak,\nor tap the button below.")
+                .font(.system(size: 12))
                 .foregroundColor(.white.opacity(0.5))
+                .multilineTextAlignment(.center)
         }
-        .padding(12)
-        .glassEffect(.regular.tint(accentColor.opacity(0.08)), in: .rect(cornerRadius: surfaceCornerRadius))
-        .padding(.top, 10)
+        .frame(maxWidth: .infinity)
+        .padding(.top, 40)
     }
 
-    private var activeTranscriptView: some View {
-        VStack(alignment: .trailing, spacing: 6) {
-            Text("Live Transcript")
-                .font(.caption)
+    private func messageBubble(_ text: String, isUser: Bool) -> some View {
+        VStack(alignment: isUser ? .trailing : .leading, spacing: 2) {
+            Text(isUser ? "You" : "Pucks")
+                .font(.system(size: 10, weight: .medium))
                 .foregroundColor(.white.opacity(0.5))
-                .frame(maxWidth: .infinity, alignment: .trailing)
 
-            Text(companionManager.activeTurnTranscriptText)
+            Text(text)
                 .font(.system(size: 13))
-                .foregroundColor(.white.opacity(0.72))
-                .italic()
+                .foregroundColor(.white.opacity(0.7))
                 .multilineTextAlignment(.leading)
+                .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: messageMaxWidth, alignment: .leading)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
-                .glassEffect(.regular.tint(.white.opacity(0.04)), in: .rect(cornerRadius: 10))
+                .glassEffect(
+                    .regular.tint(isUser ? accentColor.opacity(0.14) : .white.opacity(0.05)),
+                    in: .rect(cornerRadius: 12)
+                )
         }
     }
 
-    private var utilitySectionHeader: some View {
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // MARK: - Chat: Active Transcript + Thinking
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    private var activeTranscriptView: some View {
         HStack {
-            Text("Utilities")
-                .font(.caption)
-                .foregroundColor(.white.opacity(0.5))
             Spacer()
+            Text(companionManager.activeTurnTranscriptText)
+                .font(.system(size: 12))
+                .foregroundColor(.white.opacity(0.5))
+                .italic()
+                .multilineTextAlignment(.trailing)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: messageMaxWidth, alignment: .trailing)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .glassEffect(.regular.tint(.white.opacity(0.03)), in: .rect(cornerRadius: 10))
         }
-        .padding(.top, 10)
     }
 
     private var thinkingIndicator: some View {
         HStack(spacing: 8) {
-            BlueCursorSpinnerView()
-                .frame(width: 18, height: 18)
+            ProgressView()
+                .controlSize(.small)
+                .tint(.white)
             Text("Thinking…")
-                .font(.caption)
-                .foregroundColor(.white.opacity(0.6))
+                .font(.system(size: 12))
+                .foregroundColor(.white.opacity(0.5))
             Spacer()
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .glassEffect(.regular.tint(.white.opacity(0.035)), in: .rect(cornerRadius: 12))
-        .padding(.top, 8)
+        .padding(10)
+        .glassEffect(.regular.tint(.white.opacity(0.03)), in: .rect(cornerRadius: 10))
     }
 
-    private var shortcutSettingsView: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("Push-to-Talk")
-                    .font(.subheadline)
-                    .foregroundColor(.white.opacity(0.75))
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // MARK: - Chat: Screenshot Intercept
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    private var screenshotInterceptCard: some View {
+        HStack(spacing: 10) {
+            if let screenshot = companionManager.screenshotInterceptor.pendingScreenshot {
+                Image(nsImage: screenshot.thumbnail)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: 48, height: 36)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(.white.opacity(0.15), lineWidth: 1)
+                    )
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Screenshot detected")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.85))
+                    Text(screenshot.source.rawValue)
+                        .font(.system(size: 10))
+                        .foregroundColor(.white.opacity(0.45))
+                }
+
                 Spacer()
-                Text(shortcutConfig.label)
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundColor(.white.opacity(0.58))
+
+                Button {
+                    companionManager.attachPendingScreenshot()
+                } label: {
+                    Text("Add")
+                        .font(.system(size: 11, weight: .semibold))
+                }
+                .buttonStyle(.glass)
+                .tint(.blue)
+                .controlSize(.small)
+
+                Button {
+                    companionManager.screenshotInterceptor.dismiss()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(.white.opacity(0.4))
+                        .frame(width: 20, height: 20)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(8)
+        .glassEffect(.regular.tint(.blue.opacity(0.08)), in: .rect(cornerRadius: 10))
+    }
+
+    private var attachedScreenshotsRow: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(companionManager.attachedScreenshots) { screenshot in
+                    ZStack(alignment: .topTrailing) {
+                        Image(nsImage: screenshot.thumbnail)
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                            .frame(width: 52, height: 40)
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(.white.opacity(0.2), lineWidth: 1)
+                            )
+
+                        Button {
+                            companionManager.removeAttachedScreenshot(screenshot.id)
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 14))
+                                .foregroundColor(.white.opacity(0.7))
+                                .background(Circle().fill(.black.opacity(0.5)))
+                        }
+                        .buttonStyle(.plain)
+                        .offset(x: 4, y: -4)
+                    }
+                }
+
+                Text("\(companionManager.attachedScreenshots.count) attached")
+                    .font(.system(size: 10))
+                    .foregroundColor(.white.opacity(0.4))
+            }
+        }
+    }
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // MARK: - Chat: Microphone Controls
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    private var microphoneSection: some View {
+        VStack(spacing: 6) {
+            Button(action: toggleRecording) {
+                Image(systemName: companionManager.voiceState == .listening ? "stop.fill" : "mic.fill")
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundColor(.white)
+                    .frame(width: 56, height: 56)
+                    .background {
+                        Circle()
+                            .fill(companionManager.voiceState == .listening ? Color.red : accentColor)
+                    }
+                    .glassEffect(.regular.tint(
+                        (companionManager.voiceState == .listening ? Color.red : accentColor).opacity(0.3)
+                    ), in: .circle)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .shadow(color: (companionManager.voiceState == .listening ? Color.red : accentColor).opacity(0.4), radius: 8, y: 2)
+            .disabled(companionManager.voiceState == .thinking || !allPermissionsGranted)
+            .opacity((companionManager.voiceState == .thinking || !allPermissionsGranted) ? 0.4 : 1.0)
+
+            Text(micCaption)
+                .font(.system(size: 10))
+                .foregroundColor(.white.opacity(0.5))
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 8)
+    }
+
+    private var micCaption: String {
+        if !allPermissionsGranted { return "Grant permissions first" }
+        switch companionManager.voiceState {
+        case .listening: return "Listening…"
+        case .thinking: return "Thinking…"
+        case .speaking: return "Speaking…"
+        case .idle: return ""
+        }
+    }
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // MARK: - Settings: Permissions
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    private var permissionsSettingsSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionHeader("Permissions", icon: "lock.shield")
+
+            VStack(spacing: 6) {
+                permissionRow(title: "Microphone", icon: "mic.fill",
+                              granted: hasMicrophonePermission, action: requestMicrophonePermission)
+                permissionRow(title: "Screen Recording", icon: "rectangle.dashed.badge.record",
+                              granted: hasScreenRecordingPermission, action: requestScreenRecordingPermission)
+                permissionRow(title: "Accessibility", icon: "accessibility",
+                              granted: hasAccessibilityPermission, action: requestAccessibilityPermission)
+                permissionRow(title: "Speech Recognition", icon: "waveform",
+                              granted: hasSpeechRecognitionPermission, action: requestSpeechRecognitionPermission)
             }
 
-            VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Permissions persist across launches when the app is properly signed.")
+                    .font(.system(size: 10))
+                    .foregroundColor(.white.opacity(0.5))
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Spacer()
+
                 Button {
-                    if isCapturingShortcut {
-                        stopShortcutCapture()
-                    } else {
-                        startShortcutCapture()
-                    }
+                    checkAllPermissions()
                 } label: {
-                    HStack(spacing: 8) {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .buttonStyle(.glass)
+                .controlSize(.small)
+            }
+        }
+        .padding(10)
+        .glassEffect(.regular.tint(.white.opacity(0.05)), in: .rect(cornerRadius: surfaceCornerRadius))
+    }
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // MARK: - Settings: Push-to-Talk
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    private var shortcutSettingsSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionHeader("Push-to-Talk", icon: "keyboard")
+
+            HStack(spacing: 8) {
+                Button {
+                    if isCapturingShortcut { stopShortcutCapture() } else { startShortcutCapture() }
+                } label: {
+                    HStack(spacing: 6) {
                         Image(systemName: isCapturingShortcut ? "keyboard.badge.ellipsis" : "keyboard")
-                        Text(isCapturingShortcut ? "Press shortcut..." : shortcutConfig.label)
-                            .font(.system(size: 13, weight: .medium, design: .rounded))
-                            .lineLimit(1)
+                            .font(.system(size: 12))
+                        Text(isCapturingShortcut ? "Press shortcut…" : shortcutConfig.label)
+                            .font(.system(size: 12, weight: .medium, design: .monospaced))
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 11)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
                 }
                 .buttonStyle(.glass)
                 .tint(isCapturingShortcut ? accentColor : .white)
 
-                Button("Reset Default") {
+                Button("Reset") {
                     shortcutConfig.resetToDefault()
                 }
                 .buttonStyle(.glass)
                 .controlSize(.small)
             }
 
-            Text("Click the shortcut field, then press the combo you want. Changes apply immediately.")
-                .font(.caption)
+            Text("Click the field, then press your desired key combo. Changes apply immediately.")
+                .font(.system(size: 11))
                 .foregroundColor(.white.opacity(0.5))
         }
-        .padding(12)
-        .glassEffect(.regular.tint(.white.opacity(0.035)), in: .rect(cornerRadius: surfaceCornerRadius))
-        .padding(.top, 8)
+        .padding(10)
+        .glassEffect(.regular.tint(.white.opacity(0.05)), in: .rect(cornerRadius: surfaceCornerRadius))
     }
 
-    private var cursorSettingsView: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Cursor")
-                .font(.subheadline)
-                .foregroundColor(.white.opacity(0.75))
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // MARK: - Settings: Cursor Style
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3), spacing: 8) {
+    private var cursorSettingsSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionHeader("Cursor Style", icon: "cursorarrow")
+
+            HStack(spacing: 4) {
                 ForEach(CursorStyle.allCases) { style in
                     Button {
                         cursorConfig.style = style
                     } label: {
-                        VStack(spacing: 6) {
+                        VStack(spacing: 3) {
                             cursorStyleIcon(style)
-                                .frame(width: 18, height: 18)
+                                .frame(width: 14, height: 14)
                             Text(style.label)
-                                .font(.system(size: 11, weight: .medium))
-                                .foregroundColor(.white.opacity(0.82))
+                                .font(.system(size: 9, weight: .medium))
+                                .foregroundColor(cursorConfig.style == style ? .white : .white.opacity(0.55))
                         }
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                        .glassEffect(
-                            .regular.tint(
-                                cursorConfig.style == style
-                                    ? .blue.opacity(0.48)
-                                    : .white.opacity(0.08)
-                            ),
-                            in: .rect(cornerRadius: 10)
-                        )
+                        .padding(.vertical, 6)
+                        .background {
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(cursorConfig.style == style ? Color.blue.opacity(0.35) : .white.opacity(0.06))
+                        }
                     }
-                    .buttonStyle(.glass)
+                    .buttonStyle(.plain)
                 }
             }
 
-            HStack {
+            HStack(spacing: 8) {
                 Text("Scale")
-                    .font(.caption)
-                    .foregroundColor(.white.opacity(0.65))
-                Spacer()
+                    .font(.system(size: 11))
+                    .foregroundColor(.white.opacity(0.5))
+                Slider(value: $cursorConfig.scale, in: 0.6...2.0, step: 0.05)
+                    .tint(accentColor)
                 Text(cursorConfig.scale, format: .number.precision(.fractionLength(2)))
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundColor(.white.opacity(0.62))
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundColor(.white.opacity(0.7))
+                    .frame(width: 32)
+            }
+        }
+        .padding(10)
+        .glassEffect(.regular.tint(.white.opacity(0.05)), in: .rect(cornerRadius: surfaceCornerRadius))
+    }
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // MARK: - Settings: Debug
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    private var debugSettingsSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionHeader("Debug", icon: "ladybug")
+
+            Toggle(isOn: $showDebugSelectedText) {
+                Text("Show selected text in chat tab")
+                    .font(.system(size: 12))
+                    .foregroundColor(.white.opacity(0.5))
+            }
+            .toggleStyle(.switch)
+            .tint(accentColor)
+            .onChange(of: showDebugSelectedText) { _, newValue in
+                UserDefaults.standard.set(newValue, forKey: "showDebugSelectedText")
             }
 
-            Slider(value: $cursorConfig.scale, in: 0.6...2.0, step: 0.05)
-                .tint(accentColor)
+            Text("When enabled, shows the raw accessibility-detected selected text for debugging.")
+                .font(.system(size: 11))
+                .foregroundColor(.white.opacity(0.5))
         }
-        .padding(12)
-        .glassEffect(.regular.tint(.white.opacity(0.035)), in: .rect(cornerRadius: surfaceCornerRadius))
-        .padding(.top, 8)
+        .padding(10)
+        .glassEffect(.regular.tint(.white.opacity(0.05)), in: .rect(cornerRadius: surfaceCornerRadius))
+    }
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // MARK: - Shared Components
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    private func sectionHeader(_ title: String, icon: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: icon)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(.white.opacity(0.7))
+            Text(title)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(.white.opacity(0.7))
+        }
+    }
+
+    private func permissionRow(title: String, icon: String, granted: Bool, action: @escaping () -> Void) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 13))
+                .foregroundColor(granted ? .green : .white.opacity(0.4))
+                .frame(width: 20)
+
+            Text(title)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(.white.opacity(0.7))
+
+            Spacer()
+
+            if granted {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 14))
+                    .foregroundColor(.green)
+            } else {
+                Button("Grant") { action() }
+                    .font(.system(size: 11, weight: .semibold))
+                    .buttonStyle(.glass)
+                    .controlSize(.small)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .glassEffect(
+            .regular.tint(granted ? .green.opacity(0.1) : .white.opacity(0.04)),
+            in: .rect(cornerRadius: 8)
+        )
     }
 
     @ViewBuilder
@@ -733,106 +931,46 @@ struct CompanionPanelView: View {
         switch style {
         case .arrow:
             Image(systemName: "arrow.up.left")
-                .font(.system(size: 15, weight: .semibold))
+                .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(.white)
         case .dot:
             Circle()
                 .fill(Color.white)
-                .frame(width: 12, height: 12)
+                .frame(width: 10, height: 10)
         case .target:
             Image(systemName: "scope")
-                .font(.system(size: 15, weight: .semibold))
+                .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(.white)
         case .ring:
             Circle()
                 .stroke(Color.white, lineWidth: 2)
-                .frame(width: 14, height: 14)
+                .frame(width: 12, height: 12)
         case .diamond:
             Image(systemName: "diamond.fill")
-                .font(.system(size: 14, weight: .semibold))
+                .font(.system(size: 12, weight: .semibold))
                 .foregroundColor(.white)
         }
     }
 
-    // MARK: - Permission Row
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // MARK: - Computed Properties
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-    private func permissionRow(title: String, icon: String, granted: Bool, action: @escaping () -> Void) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: icon)
-                .font(.system(size: 16))
-                .foregroundColor(granted ? .green : .white.opacity(0.5))
-                .frame(width: 24)
-
-            Text(title)
-                .font(.body)
-                .foregroundColor(.white)
-
-            Spacer()
-
-            if granted {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundColor(.green)
-            } else {
-                Button("Grant") {
-                    action()
-                }
-                .buttonStyle(.glass)
-                .tint(accentColor)
-                .font(.caption)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 4)
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .glassEffect(
-            .regular.tint(granted ? .white.opacity(0.03) : .white.opacity(0.035)),
-            in: .rect(cornerRadius: 8)
-        )
-    }
-
-    private func messageBubble(
-        _ text: String,
-        roleLabel: String,
-        tint: Color,
-        alignment: HorizontalAlignment
-    ) -> some View {
-        VStack(alignment: alignment, spacing: 4) {
-            Text(roleLabel)
-                .font(.caption2)
-                .foregroundColor(.white.opacity(0.4))
-
-            Text(text)
-                .font(.system(size: 13, weight: .medium))
-                .foregroundColor(.white.opacity(0.92))
-                .multilineTextAlignment(.leading)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: messageMaxWidth, alignment: .leading)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
-                .glassEffect(.regular.tint(tint), in: .rect(cornerRadius: 12))
+    private var voiceStateColor: Color {
+        switch companionManager.voiceState {
+        case .idle: return .white.opacity(0.4)
+        case .listening: return accentColor
+        case .thinking: return .orange
+        case .speaking: return .green
         }
     }
 
-    // MARK: - Recording Toggle
-
-    private func toggleRecording() {
-        checkAllPermissions()
-
-        guard allPermissionsGranted else {
-            isShowingSettings = false
-            return
-        }
-
-        if companionManager.voiceState == .listening {
-            companionManager.isRecordingFromMicrophoneButton = false
-            companionManager.stopSession()
-        } else if companionManager.voiceState == .idle || companionManager.voiceState == .speaking {
-            companionManager.isRecordingFromMicrophoneButton = true
-            Task {
-                try? await companionManager.startSession()
-            }
-            isSessionRunning = true
+    private var voiceStateLabel: String {
+        switch companionManager.voiceState {
+        case .idle: return "Ready"
+        case .listening: return "Listening…"
+        case .thinking: return "Thinking…"
+        case .speaking: return "Speaking…"
         }
     }
 
@@ -841,58 +979,112 @@ struct CompanionPanelView: View {
             .replacingOccurrences(of: "\n", with: " ")
             .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-
-        if normalized.count > 220 {
-            return "\"\(normalized.prefix(217))...\""
-        }
-
+        if normalized.count > 140 { return "\"\(normalized.prefix(137))…\"" }
         return "\"\(normalized)\""
     }
 
-    private var headerSubtitle: String {
-        switch companionManager.voiceState {
-        case .idle:
-            return missingRequiredPermissions ? "Finish permissions to start a voice session." : "Ready for a voice session."
-        case .listening:
-            return "Pucks is listening."
-        case .thinking:
-            return "Pucks is working on a response."
-        case .speaking:
-            return "Pucks is speaking."
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // MARK: - Onboarding
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    private var onboardingView: some View {
+        VStack(spacing: 20) {
+            if showWelcome {
+                welcomeSection
+            } else {
+                onboardingPermissionsSection
+            }
+        }
+        .padding(24)
+    }
+
+    private var onboardingPermissionsSection: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "shield.checkered")
+                .font(.system(size: 36))
+                .foregroundColor(accentColor)
+
+            Text("Pucks needs a few permissions")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundColor(.white)
+
+            VStack(spacing: 8) {
+                permissionRow(title: "Microphone", icon: "mic.fill",
+                              granted: hasMicrophonePermission, action: requestMicrophonePermission)
+                permissionRow(title: "Screen Recording", icon: "rectangle.dashed.badge.record",
+                              granted: hasScreenRecordingPermission, action: requestScreenRecordingPermission)
+                permissionRow(title: "Accessibility", icon: "accessibility",
+                              granted: hasAccessibilityPermission, action: requestAccessibilityPermission)
+                permissionRow(title: "Speech Recognition", icon: "waveform",
+                              granted: hasSpeechRecognitionPermission, action: requestSpeechRecognitionPermission)
+            }
+
+            Text(privacyNote)
+                .font(.system(size: 11))
+                .foregroundColor(.white.opacity(0.4))
+                .multilineTextAlignment(.center)
+
+            if allPermissionsGranted {
+                Button {
+                    withAnimation { showWelcome = true }
+                    animateWelcomeText()
+                } label: {
+                    Text("Continue")
+                        .font(.system(size: 14, weight: .semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                }
+                .buttonStyle(.glassProminent)
+                .tint(.blue)
+                .transition(.opacity)
+            }
         }
     }
 
-    private var primaryActionTitle: String {
-        switch companionManager.voiceState {
-        case .listening:
-            return "Session Live"
-        case .thinking:
-            return "Processing"
-        case .speaking:
-            return "Replying"
-        case .idle:
-            return "Voice Session"
+    private var welcomeSection: some View {
+        VStack(spacing: 20) {
+            Image(systemName: "hand.wave.fill")
+                .font(.system(size: 40))
+                .foregroundColor(accentColor)
+
+            Text(welcomeText)
+                .font(.system(size: 18, weight: .medium))
+                .foregroundColor(.white)
+                .multilineTextAlignment(.center)
+
+            Button {
+                hasCompletedOnboarding = true
+                UserDefaults.standard.set(true, forKey: "hasCompletedOnboarding")
+            } label: {
+                Text("Start")
+                    .font(.system(size: 14, weight: .semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+            }
+            .buttonStyle(.glassProminent)
+            .tint(.blue)
         }
     }
 
-    private var primaryActionCaption: String {
-        if missingRequiredPermissions {
-            return "Grant the required permissions above before starting."
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // MARK: - Actions
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    private func toggleRecording() {
+        checkAllPermissions()
+        guard allPermissionsGranted else {
+            withAnimation { selectedTab = .settings }
+            return
         }
 
-        switch companionManager.voiceState {
-        case .listening:
-            return "Tap to stop, or release the push-to-talk shortcut."
-        case .thinking:
-            return "A response is being prepared."
-        case .speaking:
-            return "Tap to start a new turn when ready."
-        case .idle:
-            return "Use the button or hold the push-to-talk shortcut."
+        if companionManager.voiceState == .listening {
+            companionManager.isRecordingFromMicrophoneButton = false
+            companionManager.stopSession()
+        } else if companionManager.voiceState == .idle || companionManager.voiceState == .speaking {
+            companionManager.isRecordingFromMicrophoneButton = true
+            Task { try? await companionManager.startSession() }
         }
     }
-
-    // MARK: - Welcome Text Animation
 
     private func animateWelcomeText() {
         welcomeText = ""
@@ -908,34 +1100,25 @@ struct CompanionPanelView: View {
         }
     }
 
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     // MARK: - Permission Checks
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     private func checkAllPermissions() {
-        checkMicrophonePermission()
-        checkAccessibilityPermission()
-        checkSpeechRecognitionPermission()
-        Task {
-            await checkScreenRecordingPermission()
-        }
-    }
-
-    private func checkMicrophonePermission() {
         hasMicrophonePermission = CompanionPermissionCenter.hasMicrophonePermission()
-    }
-
-    private func checkScreenRecordingPermission() async {
-        let granted = await CompanionPermissionCenter.hasScreenRecordingPermissionAsync()
-        await MainActor.run {
-            hasScreenRecordingPermission = granted
-        }
-    }
-
-    private func checkAccessibilityPermission() {
         hasAccessibilityPermission = CompanionPermissionCenter.hasAccessibilityPermission()
-    }
-
-    private func checkSpeechRecognitionPermission() {
         hasSpeechRecognitionPermission = CompanionPermissionCenter.hasSpeechRecognitionPermission()
+        Task {
+            let granted = await CompanionPermissionCenter.hasScreenRecordingPermissionAsync()
+            await MainActor.run {
+                hasScreenRecordingPermission = granted
+                // Auto-complete onboarding if all permissions are already granted
+                if allPermissionsGranted && !hasCompletedOnboarding {
+                    hasCompletedOnboarding = true
+                    UserDefaults.standard.set(true, forKey: "hasCompletedOnboarding")
+                }
+            }
+        }
     }
 
     private func requestMicrophonePermission() {
@@ -950,9 +1133,7 @@ struct CompanionPanelView: View {
         screenPermissionPollTask = Task {
             for _ in 0..<12 {
                 let granted = await CompanionPermissionCenter.hasScreenRecordingPermissionAsync()
-                await MainActor.run {
-                    hasScreenRecordingPermission = granted
-                }
+                await MainActor.run { hasScreenRecordingPermission = granted }
                 if granted { break }
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
             }
@@ -969,13 +1150,9 @@ struct CompanionPanelView: View {
         }
     }
 
-    // MARK: - Floating Button Manager
-
-    func configureFloatingButtonManager() {
-        floatingButtonManager.onFloatingButtonClicked = { [self] in
-            bringMainWindowToFront()
-        }
-    }
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // MARK: - Shortcut Capture
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     private func startShortcutCapture() {
         stopShortcutCapture()
@@ -983,14 +1160,9 @@ struct CompanionPanelView: View {
 
         shortcutEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             guard isCapturingShortcut else { return event }
-
             let modifiers = PushToTalkShortcutConfiguration.captureModifiers(from: event.modifierFlags)
-            let disallowedKeyCodes: Set<UInt16> = [UInt16(kVK_Command), UInt16(kVK_Shift), UInt16(kVK_Option), UInt16(kVK_Control)]
-
-            guard !disallowedKeyCodes.contains(event.keyCode), modifiers != 0 else {
-                return nil
-            }
-
+            let disallowed: Set<UInt16> = [UInt16(kVK_Command), UInt16(kVK_Shift), UInt16(kVK_Option), UInt16(kVK_Control)]
+            guard !disallowed.contains(event.keyCode), modifiers != 0 else { return nil }
             shortcutConfig.update(keyCode: UInt32(event.keyCode), modifiers: modifiers)
             stopShortcutCapture()
             return nil
@@ -999,15 +1171,23 @@ struct CompanionPanelView: View {
 
     private func stopShortcutCapture() {
         isCapturingShortcut = false
-        if let shortcutEventMonitor {
-            NSEvent.removeMonitor(shortcutEventMonitor)
-            self.shortcutEventMonitor = nil
+        if let m = shortcutEventMonitor {
+            NSEvent.removeMonitor(m)
+            shortcutEventMonitor = nil
         }
     }
 
-    // MARK: - Window Focus Observation
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // MARK: - Floating Button & Window Focus
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-    func startObservingMainWindowFocusChanges() {
+    private func configureFloatingButtonManager() {
+        floatingButtonManager.onFloatingButtonClicked = {
+            bringMainWindowToFront()
+        }
+    }
+
+    private func startObservingMainWindowFocusChanges() {
         NotificationCenter.default.addObserver(
             forName: NSWindow.didBecomeKeyNotification,
             object: nil,
@@ -1031,59 +1211,44 @@ struct CompanionPanelView: View {
         }
     }
 
-    // MARK: - Floating Button Visibility
-
-    func updateFloatingButtonVisibility() {
-        if isSessionRunning && !isMainWindowCurrentlyFocused {
+    private func updateFloatingButtonVisibility() {
+        if !companionManager.conversationHistory.isEmpty && !isMainWindowCurrentlyFocused {
             floatingButtonManager.showFloatingButton()
         } else {
             floatingButtonManager.hideFloatingButton()
         }
     }
 
-    // MARK: - Bring Window to Front
+    private func requestPanelResize(width: CGFloat? = nil, height: CGFloat) {
+        var info: [String: CGFloat] = ["height": height]
+        if let w = width { info["width"] = w }
+        NotificationCenter.default.post(
+            name: MenuBarPanelManager.resizePanelNotification,
+            object: nil,
+            userInfo: info
+        )
+    }
 
-    func bringMainWindowToFront() {
+    private func bringMainWindowToFront() {
         NSApplication.shared.activate(ignoringOtherApps: true)
         NSApplication.shared.mainWindow?.makeKeyAndOrderFront(nil)
         NSApplication.shared.mainWindow?.orderFrontRegardless()
     }
 }
 
-// MARK: - BlueCursorSpinnerView
+// MARK: - WindowDragArea
 
-struct BlueCursorSpinnerView: View {
-    @State private var rotation: Double = 0
-
-    var body: some View {
-        Triangle()
-            .fill(Color.blue)
-            .rotationEffect(.degrees(rotation))
-            .onAppear {
-                withAnimation(
-                    .linear(duration: 1.0)
-                    .repeatForever(autoreverses: false)
-                ) {
-                    rotation = 360
-                }
-            }
+/// An NSViewRepresentable that makes its area draggable for window movement,
+/// even when the panel has isMovableByWindowBackground = false.
+struct WindowDragArea: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        WindowDragView()
     }
+    func updateNSView(_ nsView: NSView, context: Context) {}
 }
 
-// MARK: - Triangle Shape
-
-struct Triangle: Shape {
-    func path(in rect: CGRect) -> Path {
-        var path = Path()
-        path.move(to: CGPoint(x: rect.midX, y: rect.minY))
-        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
-        path.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
-        path.closeSubpath()
-        return path
+private class WindowDragView: NSView {
+    override func mouseDown(with event: NSEvent) {
+        window?.performDrag(with: event)
     }
 }
-
-// MARK: - Video Player Dimensions
-
-let onboardingVideoPlayerWidth: CGFloat = 320
-let onboardingVideoPlayerHeight: CGFloat = 180
