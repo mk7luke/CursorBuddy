@@ -331,7 +331,7 @@ extension Value {
             var result: [String: Any] = [:]
             for (k, v) in dict { result[k] = v.toJSONObject() }
             return result
-        case .data(let mimeType, let data): return data.base64EncodedString()
+        case .data(_, let data): return data.base64EncodedString()
         }
     }
 }

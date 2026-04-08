@@ -259,69 +259,139 @@ struct CompanionPanelView: View {
 
     private var fullChatLayout: some View {
         VStack(spacing: 0) {
-            // Inline permission warning
-            if !allPermissionsGranted {
-                permissionsWarningBanner
-                    .padding(.horizontal, 12)
-                    .padding(.top, 6)
+            // ═══ FIXED HEADER ═══
+            VStack(spacing: 4) {
+                if !allPermissionsGranted {
+                    permissionsWarningBanner
+                        .padding(.horizontal, 12)
+                }
+                if selectedTextMonitor.hasSelection {
+                    selectedTextCard
+                        .padding(.horizontal, 12)
+                }
             }
+            .padding(.top, 4)
 
-            // Selected text card
-            if selectedTextMonitor.hasSelection {
-                selectedTextCard
-                    .padding(.horizontal, 12)
-                    .padding(.top, 6)
-            }
-
-            // Debug selected text
-            if showDebugSelectedText && selectedTextMonitor.hasSelection {
-                debugSelectedTextView
-                    .padding(.horizontal, 12)
-                    .padding(.top, 4)
-            }
-
-            // Conversation area (expands to fill available space)
-            conversationSection
+            // ═══ SCROLLABLE MESSAGES (fills all remaining space) ═══
+            chatMessagesScrollView
                 .padding(.horizontal, 12)
-                .padding(.top, 4)
-                .frame(maxHeight: .infinity)
 
-            // Thinking indicator
-            if companionManager.voiceState == .thinking {
-                thinkingIndicator
+            // ═══ FIXED FOOTER (chin) ═══
+            VStack(spacing: 4) {
+                // Thinking indicator
+                if companionManager.voiceState == .thinking {
+                    thinkingIndicator
+                        .padding(.horizontal, 12)
+                }
+
+                // Active transcript
+                if !companionManager.activeTurnTranscriptText.isEmpty {
+                    activeTranscriptView
+                        .padding(.horizontal, 12)
+                }
+
+                // Screenshot intercept
+                if companionManager.screenshotInterceptor.pendingScreenshot != nil {
+                    screenshotInterceptCard
+                        .padding(.horizontal, 12)
+                }
+
+                // Attached screenshots
+                if !companionManager.attachedScreenshots.isEmpty {
+                    attachedScreenshotsRow
+                        .padding(.horizontal, 12)
+                }
+
+                // Microphone
+                microphoneSection
                     .padding(.horizontal, 12)
-                    .padding(.top, 4)
+                    .padding(.bottom, 8)
             }
-
-            // Active transcript
-            if !companionManager.activeTurnTranscriptText.isEmpty {
-                activeTranscriptView
-                    .padding(.horizontal, 12)
-                    .padding(.top, 4)
-            }
-
-            // ── Bottom pinned area ──
-
-            // Screenshot intercept
-            if companionManager.screenshotInterceptor.pendingScreenshot != nil {
-                screenshotInterceptCard
-                    .padding(.horizontal, 12)
-                    .padding(.top, 4)
-            }
-
-            // Attached screenshots
-            if !companionManager.attachedScreenshots.isEmpty {
-                attachedScreenshotsRow
-                    .padding(.horizontal, 12)
-                    .padding(.top, 4)
-            }
-
-            // Microphone — centered
-            microphoneSection
-                .padding(.horizontal, 12)
-                .padding(.top, 6)
-                .padding(.bottom, 10)
+            .padding(.top, 4)
         }
+    }
+
+    // MARK: - Chat Messages Scroll View
+
+    private var chatMessagesScrollView: some View {
+        ZStack {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 10) {
+                        // Top spacer so content doesn't start flush against fade
+                        Color.clear.frame(height: 8)
+
+                        if companionManager.conversationHistory.isEmpty {
+                            emptyConversationPlaceholder
+                        } else {
+                            // Clear button
+                            HStack {
+                                Spacer()
+                                Button {
+                                    companionManager.clearConversation()
+                                } label: {
+                                    HStack(spacing: 3) {
+                                        Image(systemName: "arrow.counterclockwise")
+                                            .font(.system(size: 9))
+                                        Text("Clear")
+                                            .font(.system(size: 10, weight: .medium))
+                                    }
+                                    .foregroundColor(.white.opacity(0.4))
+                                }
+                                .buttonStyle(.plain)
+                            }
+
+                            ForEach(companionManager.conversationHistory) { turn in
+                                VStack(spacing: 6) {
+                                    HStack {
+                                        Spacer(minLength: 48)
+                                        messageBubble(turn.userTranscript, isUser: true, turn: turn)
+                                    }
+                                    HStack {
+                                        messageBubble(turn.assistantResponse, isUser: false, turn: turn)
+                                        Spacer(minLength: 48)
+                                    }
+                                }
+                                .id(turn.id)
+                            }
+                        }
+
+                        // Bottom spacer so content doesn't end flush against fade
+                        Color.clear.frame(height: 8)
+                    }
+                    .padding(.vertical, 4)
+                }
+                .scrollIndicators(.hidden)
+                .onChange(of: companionManager.conversationHistory.count) {
+                    if let last = companionManager.conversationHistory.last {
+                        withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
+                    }
+                }
+            }
+
+            // Fade edges so messages don't hard-clip against header/footer
+            VStack {
+                LinearGradient(
+                    colors: [.black, .clear],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .frame(height: 24)
+                .allowsHitTesting(false)
+
+                Spacer()
+
+                LinearGradient(
+                    colors: [.clear, .black],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .frame(height: 24)
+                .allowsHitTesting(false)
+            }
+            .blendMode(.destinationOut)
+        }
+        .compositingGroup()
     }
 
     // MARK: Compact (short/wide) chat layout
@@ -486,84 +556,7 @@ struct CompanionPanelView: View {
     // MARK: - Chat: Conversation
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-    private var conversationSection: some View {
-        VStack(spacing: 0) {
-            // Clear button
-            if !companionManager.conversationHistory.isEmpty {
-                HStack {
-                    Spacer()
-                    Button {
-                        companionManager.clearConversation()
-                    } label: {
-                        HStack(spacing: 3) {
-                            Image(systemName: "arrow.counterclockwise")
-                                .font(.system(size: 9))
-                            Text("Clear")
-                                .font(.system(size: 10, weight: .medium))
-                        }
-                        .foregroundColor(.white.opacity(0.4))
-                    }
-                    .buttonStyle(.plain)
-                }
-                .padding(.bottom, 4)
-            }
-
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 10) {
-                        if companionManager.conversationHistory.isEmpty {
-                            emptyConversationPlaceholder
-                        } else {
-                            ForEach(companionManager.conversationHistory) { turn in
-                                VStack(spacing: 6) {
-                                    // User message — right aligned
-                                    HStack {
-                                        Spacer(minLength: 48)
-                                        messageBubble(turn.userTranscript, isUser: true, turn: turn)
-                                    }
-
-                                    // Assistant response — left aligned
-                                    HStack {
-                                        messageBubble(turn.assistantResponse, isUser: false, turn: turn)
-                                        Spacer(minLength: 48)
-                                    }
-                                }
-                                .id(turn.id)
-                            }
-                        }
-                    }
-                    .padding(.vertical, 4)
-                }
-                .scrollIndicators(.hidden)
-                // Fade messages out before they reach the top/bottom edges
-                // so they don't clip behind the header bar or mic button chin.
-                .mask(
-                    VStack(spacing: 0) {
-                        LinearGradient(
-                            colors: [.clear, .black],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                        .frame(height: 32)
-
-                        Color.black
-
-                        LinearGradient(
-                            colors: [.black, .clear],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                        .frame(height: 32)
-                    }
-                )
-                .onChange(of: companionManager.conversationHistory.count) {
-                    if let last = companionManager.conversationHistory.last {
-                        withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
-                    }
-                }
-            }
-        }
-    }
+    // conversationSection replaced by chatMessagesScrollView in fullChatLayout
 
     private var emptyConversationPlaceholder: some View {
         VStack(spacing: 10) {
