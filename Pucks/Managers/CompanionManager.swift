@@ -263,14 +263,25 @@ class CompanionManager: ObservableObject {
     func handleTranscript(text: String) async {
         voiceState = .thinking
 
-        // 1. Capture screenshots of all screens
+        // 1. Capture screenshot — use cursor-area crop for contextual "what is this?" questions
+        let cursorFocusPatterns = ["what is this", "what does this", "what's this", "what am i looking at",
+                                   "explain this", "what does that", "what's that", "tell me about this",
+                                   "what is that", "click this", "click that", "this button", "that button"]
+        let lowered = text.lowercased()
+        let isCursorFocusedQuestion = cursorFocusPatterns.contains { lowered.contains($0) }
+
         var screenshots: [ScreenCapture] = []
-        if CompanionPermissionCenter.hasScreenRecordingPermission() {
+        if CompanionPermissionCenter.shouldTreatScreenRecordingAsGranted() {
             do {
-                screenshots = try await screenCapture.captureScreen()
-                print("[CompanionManager] Captured \(screenshots.count) screenshot(s).")
+                screenshots = try await screenCapture.captureScreen(cursorAreaOnly: isCursorFocusedQuestion)
+                let mode = isCursorFocusedQuestion ? "cursor-area" : "full-screen"
+                print("[CompanionManager] Captured \(screenshots.count) screenshot(s) (\(mode)).")
             } catch {
                 print("[CompanionManager] Screenshot capture failed: \(error)")
+                // If the capture actually fails, the permission may have been
+                // genuinely revoked — clear the persisted confirmation so the
+                // UI shows the grant button again.
+                CompanionPermissionCenter.clearScreenRecordingConfirmation()
             }
         } else {
             print("[CompanionManager] Screen recording permission missing; continuing without screenshots.")
@@ -393,16 +404,81 @@ class CompanionManager: ObservableObject {
                 screenLabels: screenLabels
             )
 
+            // Show streaming overlay near cursor and start sentence-based TTS
+            let cursorLoc = NSEvent.mouseLocation
+            CompanionResponseOverlayManager.shared.showStreamingResponse("", near: cursorLoc)
+
             var response = ""
+            var ttsSentenceBuffer = ""
+            // Queue of TTS tasks that play back-to-back
+            var ttsQueue: [Task<Void, Error>] = []
+            let sentenceEndings: [Character] = [".", "!", "?"]
+
             for try await chunk in responseStream {
                 response += chunk
+                ttsSentenceBuffer += chunk
+
+                // Show streaming text with [POINT:...] tags stripped for display.
+                // Strip any trailing partial "[POINT:" prefix so tags don't flicker.
+                let displayText = Self.stripPointTagsForDisplay(response)
+                CompanionResponseOverlayManager.shared.viewModel.streamingResponseText = displayText
+
+                // Sentence-based TTS: fire off TTS as soon as we have a complete sentence.
+                // Look for sentence-ending punctuation followed by a space or end-of-chunk.
+                if let lastSentenceEnd = ttsSentenceBuffer.lastIndex(where: { sentenceEndings.contains($0) }) {
+                    let distanceToEnd = ttsSentenceBuffer.distance(from: lastSentenceEnd, to: ttsSentenceBuffer.endIndex)
+                    // Only split if the sentence ending is followed by a space or is the chunk boundary
+                    if distanceToEnd == 1 || (distanceToEnd > 1 && ttsSentenceBuffer[ttsSentenceBuffer.index(after: lastSentenceEnd)] == " ") {
+                        let sentenceUpTo = ttsSentenceBuffer[...lastSentenceEnd]
+                        let remainder = ttsSentenceBuffer[ttsSentenceBuffer.index(after: lastSentenceEnd)...]
+
+                        // Clean [POINT:...] tags from the sentence before sending to TTS
+                        let sentenceForTTS = Self.stripPointTagsForDisplay(String(sentenceUpTo))
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                        ttsSentenceBuffer = String(remainder)
+
+                        if !sentenceForTTS.isEmpty {
+                            // Wait for previous TTS to finish, then fire this one
+                            let previousTasks = ttsQueue
+                            let ttsClient = self.ttsClient
+                            let ttsTask = Task<Void, Error> {
+                                // Wait for all previous TTS segments to finish playing
+                                for prev in previousTasks {
+                                    _ = try? await prev.value
+                                }
+                                let _ = try await ttsClient.speak(text: sentenceForTTS)
+                            }
+                            ttsQueue.append(ttsTask)
+
+                            // Switch to speaking state on first sentence
+                            if voiceState == .thinking {
+                                pttOverlayManager?.hide()
+                                voiceState = .speaking
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Flush any remaining text that didn't end with sentence punctuation
+            let finalSentence = Self.stripPointTagsForDisplay(ttsSentenceBuffer)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !finalSentence.isEmpty {
+                let previousTasks = ttsQueue
+                let ttsClient = self.ttsClient
+                let ttsTask = Task<Void, Error> {
+                    for prev in previousTasks {
+                        _ = try? await prev.value
+                    }
+                    let _ = try await ttsClient.speak(text: finalSentence)
+                }
+                ttsQueue.append(ttsTask)
             }
 
             print("[CompanionManager] Claude response received (\(response.count) chars).")
 
             // 5. Parse all [POINT:x,y:label] tags via ElementLocationDetector
             let parsed = elementDetector?.parse(responseText: response)
-            let cleanedText = parsed?.cleanedText ?? response
 
             // 6. Store conversation turn
             let turn = ConversationTurn(userTranscript: text, assistantResponse: response)
@@ -417,45 +493,73 @@ class CompanionManager: ObservableObject {
                 return (op, entry.label)
             }
 
-            // 8. Hide PTT overlay
-            pttOverlayManager?.hide()
+            // 8. Hide PTT overlay and ensure speaking state
+            if voiceState == .thinking {
+                pttOverlayManager?.hide()
+            }
             voiceState = .speaking
 
-            if overlayPoints.isEmpty {
-                // No points — just speak
-                let _ = try await ttsClient.speak(text: cleanedText)
-            } else {
-                // Run cursor tour concurrently with TTS so the pointer moves while Claude speaks.
-                // Each point gets ~2.5 s of screen time; we cancel the tour when TTS finishes.
+            // Start cursor tour if we have points
+            var tourTask: Task<Void, Never>?
+            if !overlayPoints.isEmpty {
                 let detector = elementDetector
-                let tourTask = Task { @MainActor in
+                tourTask = Task { @MainActor in
                     OverlayWindowManager.shared.overlayMode = .navigating
                     for (index, entry) in overlayPoints.enumerated() {
                         if Task.isCancelled { break }
                         detector?.navigateTo(point: entry.point, label: entry.label)
-                        // Pause between points (skip delay after the last one)
                         if index < overlayPoints.count - 1 {
                             try? await Task.sleep(nanoseconds: 2_500_000_000)
                         }
                     }
                 }
+            }
 
-                let _ = try await ttsClient.speak(text: cleanedText)
-                tourTask.cancel()
+            // Wait for all TTS segments to finish playing
+            for ttsTask in ttsQueue {
+                _ = try? await ttsTask.value
+            }
 
-                // Return cursor and go idle
+            // Clean up tour and overlay
+            tourTask?.cancel()
+            if !overlayPoints.isEmpty {
                 elementDetector?.returnToCursor()
                 try? await Task.sleep(nanoseconds: 800_000_000)
                 OverlayWindowManager.shared.overlayMode = .idle
             }
 
+            // Dismiss streaming text overlay
+            CompanionResponseOverlayManager.shared.dismiss()
+
             voiceState = .idle
             print("[CompanionManager] TTS playback complete.")
         } catch {
             print("[CompanionManager] Claude API error: \(error)")
+            CompanionResponseOverlayManager.shared.dismiss()
             pttOverlayManager?.hide()
             voiceState = .idle
         }
+    }
+
+    // MARK: - Display Text Helpers
+
+    /// Strips complete [POINT:...] tags and any trailing partial "[POINT:" prefix
+    /// from text so the streaming overlay shows clean readable text.
+    static func stripPointTagsForDisplay(_ text: String) -> String {
+        // Remove complete [POINT:...] tags (including [POINT:none])
+        var cleaned = text.replacingOccurrences(
+            of: #"\[POINT:[^\]]*\]"#,
+            with: "",
+            options: .regularExpression
+        )
+        // Remove any trailing partial tag like "[POINT:" or "[POINT:123,4"
+        if let bracketIndex = cleaned.lastIndex(of: "[") {
+            let trailing = String(cleaned[bracketIndex...])
+            if trailing.hasPrefix("[POINT:") || trailing == "[" || trailing.hasPrefix("[P") {
+                cleaned = String(cleaned[..<bracketIndex])
+            }
+        }
+        return cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // MARK: - Point Tag Parsing

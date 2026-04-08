@@ -1,6 +1,5 @@
 import AppKit
 import AVFoundation
-import ScreenCaptureKit
 import Speech
 import Combine
 
@@ -43,15 +42,13 @@ final class PermissionMonitor: ObservableObject {
         accessibilityPermission = CompanionPermissionCenter.hasAccessibilityPermission()
         speechRecognitionPermission = CompanionPermissionCenter.hasSpeechRecognitionPermission()
 
-        Task {
-            let screen = await CompanionPermissionCenter.hasScreenRecordingPermissionAsync()
-            await MainActor.run {
-                let changed = self.screenRecordingPermission != screen
-                self.screenRecordingPermission = screen
-                if changed {
-                    self.notifyChange()
-                }
-            }
+        // Use the persisted fallback so false negatives from
+        // CGPreflightScreenCaptureAccess() don't reset the permission UI.
+        let screen = CompanionPermissionCenter.shouldTreatScreenRecordingAsGranted()
+        let changed = screenRecordingPermission != screen
+        screenRecordingPermission = screen
+        if changed {
+            notifyChange()
         }
     }
 

@@ -21,24 +21,6 @@ final class ModernGlobalShortcutMonitor {
     var keyCode: UInt32 = UInt32(kVK_Space)
     var modifiers: UInt32 = UInt32(controlKey | optionKey)
 
-    // Required modifier flags for CGEvent tap
-    private var requiredFlags: CGEventFlags {
-        var flags: CGEventFlags = []
-        if modifiers & UInt32(controlKey) != 0 { flags.insert(.maskControl) }
-        if modifiers & UInt32(optionKey) != 0 { flags.insert(.maskAlternate) }
-        if modifiers & UInt32(shiftKey) != 0 { flags.insert(.maskShift) }
-        if modifiers & UInt32(cmdKey) != 0 { flags.insert(.maskCommand) }
-        return flags
-    }
-
-    // Forbidden keys — these must NOT be pressed alone (but may be modifiers)
-    private var forbiddenKeys: Set<UInt16> = [
-        UInt16(kVK_Command),
-        UInt16(kVK_Shift),
-        UInt16(kVK_Option),
-        UInt16(kVK_Control)
-    ]
-
     // MARK: - Callbacks
 
     var onShortcutPressed: (() -> Void)?
@@ -57,19 +39,23 @@ final class ModernGlobalShortcutMonitor {
 
     @discardableResult
     func start() -> Bool {
+        // If the event tap is already running, don't restart it.
+        // Restarting resets isPressed, which would break the shortcut
+        // mid-press when the permission poller calls start() every few seconds.
         guard !isRunning else { return true }
 
-        // Create an event tap at the HID level to capture key events
-        // We want keyDown and keyUp events before they reach other apps
+        // Listen-only tap: doesn't consume events, so other apps still receive
+        // them. More reliable than .defaultTap for modifier-only shortcuts and
+        // less likely to be disabled by the system.
         let eventMask = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue) | (1 << CGEventType.flagsChanged.rawValue)
 
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
-            options: .defaultTap,
+            options: .listenOnly,
             eventsOfInterest: CGEventMask(eventMask),
             callback: { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
-                guard let refcon = refcon else { return Unmanaged.passRetained(event) }
+                guard let refcon = refcon else { return Unmanaged.passUnretained(event) }
                 let monitor = Unmanaged<ModernGlobalShortcutMonitor>.fromOpaque(refcon).takeUnretainedValue()
                 return monitor.handleEvent(proxy: proxy, type: type, event: event)
             },
@@ -81,8 +67,10 @@ final class ModernGlobalShortcutMonitor {
 
         eventTap = tap
 
+        // Add to the main run loop (not the current one) so events are
+        // always processed on the main thread, matching Clicky's behavior.
         runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
+        CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
 
         isRunning = true
@@ -93,22 +81,46 @@ final class ModernGlobalShortcutMonitor {
     func stop() {
         guard isRunning else { return }
 
-        if let tap = eventTap {
-            CGEvent.tapEnable(tap: tap, enable: false)
-        }
+        isPressed = false
 
         if let source = runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes)
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
             runLoopSource = nil
         }
 
-        eventTap = nil
+        if let tap = eventTap {
+            CFMachPortInvalidate(tap)
+            eventTap = nil
+        }
+
         isRunning = false
-        isPressed = false
         print("[ModernShortcut] Event tap stopped")
     }
 
     // MARK: - Event Handler
+
+    /// Converts Carbon modifier bitmask to NSEvent.ModifierFlags for reliable comparison.
+    /// This matches Clicky's approach of using NSEvent.ModifierFlags.contains() which is
+    /// proven to work correctly for modifier-only shortcuts like Ctrl+Option.
+    private var requiredNSFlags: NSEvent.ModifierFlags {
+        var flags: NSEvent.ModifierFlags = []
+        if modifiers & UInt32(controlKey) != 0 { flags.insert(.control) }
+        if modifiers & UInt32(optionKey) != 0 { flags.insert(.option) }
+        if modifiers & UInt32(shiftKey) != 0 { flags.insert(.shift) }
+        if modifiers & UInt32(cmdKey) != 0 { flags.insert(.command) }
+        return flags
+    }
+
+    /// The NSEvent.ModifierFlags for the key that IS the shortcut trigger (when it's a modifier key).
+    private var targetNSFlag: NSEvent.ModifierFlags? {
+        switch Int(keyCode) {
+        case kVK_Command, kVK_RightCommand: return .command
+        case kVK_Control, kVK_RightControl: return .control
+        case kVK_Option, kVK_RightOption: return .option
+        case kVK_Shift, kVK_RightShift: return .shift
+        default: return nil
+        }
+    }
 
     private func handleEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         // Handle tap being disabled by the system
@@ -116,52 +128,63 @@ final class ModernGlobalShortcutMonitor {
             if let tap = eventTap {
                 CGEvent.tapEnable(tap: tap, enable: true)
             }
-            return Unmanaged.passRetained(event)
+            return Unmanaged.passUnretained(event)
         }
 
-        let keyCode = UInt32(event.getIntegerValueField(.keyboardEventKeycode))
-        let flags = event.flags
+        // ── Modifier-only shortcut (e.g. Ctrl+Option) ──
+        // Uses Clicky's proven approach: convert CGEvent flags to NSEvent.ModifierFlags,
+        // strip device-dependent bits, and just check .contains(). No keyCode matching,
+        // no "extra forbidden modifiers" — just: are the required modifiers all held?
+        if let targetNSFlag, type == .flagsChanged {
+            let eventNSFlags = NSEvent.ModifierFlags(rawValue: UInt(event.flags.rawValue))
+                .intersection(.deviceIndependentFlagsMask)
 
-        // Only process our target key code
-        guard keyCode == self.keyCode else {
-            return Unmanaged.passRetained(event)
+            // All required modifiers PLUS the target modifier key must be held
+            let allRequired = requiredNSFlags.union(targetNSFlag)
+            let isShortcutCurrentlyPressed = eventNSFlags.contains(allRequired)
+
+            if isShortcutCurrentlyPressed && !isPressed {
+                isPressed = true
+                // Call directly — this callback already runs on the main thread
+                // (added to CFRunLoopGetMain). Do NOT use DispatchQueue.main.async
+                // as it won't fire reliably when the app is in the background.
+                onShortcutPressed?()
+            } else if !isShortcutCurrentlyPressed && isPressed {
+                isPressed = false
+                onShortcutReleased?()
+            }
+
+            return Unmanaged.passUnretained(event)
         }
 
-        // Check flags match our required modifiers
-        let ourFlags = requiredFlags
-        let hasRequiredFlags = flags.contains(ourFlags)
+        // ── Regular key + modifiers shortcut (e.g. Ctrl+Option+Space) ──
+        let eventKeyCode = UInt32(event.getIntegerValueField(.keyboardEventKeycode))
+        guard eventKeyCode == self.keyCode else {
+            return Unmanaged.passUnretained(event)
+        }
+
+        let eventNSFlags = NSEvent.ModifierFlags(rawValue: UInt(event.flags.rawValue))
+            .intersection(.deviceIndependentFlagsMask)
+        let hasRequiredFlags = eventNSFlags.contains(requiredNSFlags)
 
         switch type {
         case .keyDown:
-            // Only trigger if:
-            // 1. Our required modifiers are present (except we allow the key itself to provide modifiers)
-            // 2. No "forbidden" extra modifiers are present (e.g., if we want Ctrl+Space, Command+Space should not trigger)
-            let extraForbidden: CGEventFlags = [.maskCommand, .maskControl, .maskAlternate, .maskShift]
-            let flagsWithoutOurs = flags.intersection(extraForbidden).subtracting(ourFlags)
-
-            if hasRequiredFlags && flagsWithoutOurs.isEmpty {
-                if !isPressed {
-                    isPressed = true
-                    DispatchQueue.main.async { [weak self] in
-                        self?.onShortcutPressed?()
-                    }
-                }
+            if hasRequiredFlags && !isPressed {
+                isPressed = true
+                onShortcutPressed?()
             }
 
         case .keyUp:
             if isPressed {
                 isPressed = false
-                DispatchQueue.main.async { [weak self] in
-                    self?.onShortcutReleased?()
-                }
+                onShortcutReleased?()
             }
 
         default:
             break
         }
 
-        // Don't consume the event — let it reach other apps
-        return Unmanaged.passRetained(event)
+        return Unmanaged.passUnretained(event)
     }
 }
 

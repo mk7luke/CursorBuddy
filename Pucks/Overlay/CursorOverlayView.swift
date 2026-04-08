@@ -4,6 +4,10 @@ import Combine
 /// The blue triangle cursor buddy and label bubble rendered on the transparent overlay.
 /// The cursor follows the mouse at all times and flies to [POINT:] targets.
 /// When listening, it shows a "Listening..." chip instead of the triangle.
+///
+/// Each screen gets its own CursorOverlayView with a unique `screenFrame`.
+/// The view only renders when the mouse is on THIS screen so the cursor
+/// doesn't appear on multiple monitors at once.
 struct CursorOverlayView: View {
     @ObservedObject var detector: ElementLocationDetector
     @ObservedObject var voiceState: VoiceStateObservable
@@ -12,15 +16,29 @@ struct CursorOverlayView: View {
     @ObservedObject var shortcutConfig = PushToTalkShortcutConfiguration.shared
     @StateObject private var mouseTracker = MouseTracker()
 
+    /// The frame of the screen this overlay covers (AppKit coords, bottom-left origin).
+    /// Used to determine whether the cursor is on THIS screen.
+    let screenFrame: CGRect
+
+    /// True when the mouse cursor is currently on this screen's overlay.
+    private var isCursorOnThisScreen: Bool {
+        screenFrame.contains(mouseTracker.mouseLocation)
+    }
+
     var body: some View {
         GeometryReader { geo in
             ZStack {
                 let pos = detector.isNavigating
                     ? detector.cursorPosition
-                    : mouseTracker.screenPosition(in: geo)
+                    : mouseTracker.screenPosition(for: screenFrame)
+
+                // Only render the cursor on the screen where the mouse actually is.
+                // During navigation (flight animation), always show on this screen
+                // since the detector manages its own coordinate space.
+                let shouldShow = isCursorOnThisScreen || detector.isNavigating
 
                 // ── Listening/Processing chip (replaces cursor when active) ──
-                if voiceState.state == .listening || voiceState.state == .thinking {
+                if shouldShow && (voiceState.state == .listening || voiceState.state == .thinking) {
                     HStack(spacing: 6) {
                         if voiceState.state == .listening {
                             AudioWaveformView(levels: voiceState.audioLevels)
@@ -50,7 +68,7 @@ struct CursorOverlayView: View {
                 }
 
                 // ── Suggestion chip when text is selected ──
-                if !detector.isNavigating &&
+                if shouldShow && !detector.isNavigating &&
                     voiceState.state != .listening &&
                     voiceState.state != .thinking &&
                     selectedTextMonitor.hasSelection {
@@ -70,7 +88,7 @@ struct CursorOverlayView: View {
                     }
                     .shadow(color: .black.opacity(0.25), radius: 10, x: 0, y: 4)
                     .position(x: pos.x + 90, y: pos.y + 12)
-                } else if voiceState.state != .listening && voiceState.state != .thinking {
+                } else if shouldShow && voiceState.state != .listening && voiceState.state != .thinking {
                     let cursorW: CGFloat = 20
                     let cursorH: CGFloat = 28
                     let iconSize: CGFloat = 20
@@ -91,7 +109,7 @@ struct CursorOverlayView: View {
                 }
 
                 // ── Label bubble at target ──
-                if detector.navigationBubbleOpacity > 0,
+                if shouldShow && detector.navigationBubbleOpacity > 0,
                    let targetPoint = detector.detectedElementScreenLocation {
                     Text(detector.navigationBubbleText)
                         .font(.system(size: 13, weight: .medium))
@@ -288,15 +306,13 @@ final class MouseTracker: ObservableObject {
 
     deinit { timer?.invalidate() }
 
-    func screenPosition(in geo: GeometryProxy) -> CGPoint {
-        // Find the screen containing the cursor. Fall back to main if not found.
-        let screen = NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) }) ?? NSScreen.main
-        guard let screen else {
-            return CGPoint(x: mouseLocation.x, y: mouseLocation.y)
-        }
-        // Convert global AppKit coords (y=0 at bottom) to the overlay window's local space (y=0 at top).
-        let localX = mouseLocation.x - screen.frame.minX
-        let localY = screen.frame.maxY - mouseLocation.y
+    /// Convert the global mouse location to overlay-window-local coords for a specific screen.
+    /// Each overlay window covers exactly one screen, so we convert relative to THAT screen's
+    /// frame — not whichever screen the mouse happens to be on. This prevents the cursor from
+    /// rendering at the wrong position on secondary monitors.
+    func screenPosition(for screenFrame: CGRect) -> CGPoint {
+        let localX = mouseLocation.x - screenFrame.minX
+        let localY = screenFrame.maxY - mouseLocation.y
         return CGPoint(x: localX, y: localY)
     }
 }

@@ -89,10 +89,11 @@ class CartesiaTTSClient {
         }
 
         logger.info("Cartesia TTS: received \(audioData.count) bytes")
+        let finalAudioData = audioData
 
         // Play audio
         try await MainActor.run {
-            audioPlayer = try AVAudioPlayer(data: audioData)
+            audioPlayer = try AVAudioPlayer(data: finalAudioData)
             audioPlayer?.play()
         }
 
@@ -101,7 +102,7 @@ class CartesiaTTSClient {
             try await Task.sleep(nanoseconds: 100_000_000)
         }
 
-        return audioData
+        return finalAudioData
     }
 
     func stopPlayback() {

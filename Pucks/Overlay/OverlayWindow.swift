@@ -26,8 +26,9 @@ class OverlayWindow: NSPanel {
         hasShadow = false
         ignoresMouseEvents = true
 
-        // Float above normal windows
-        level = .statusBar + 1
+        // Float above ALL other windows, including our own panel and popups.
+        // .screenSaver (1000) is above .popUpMenu (101), .statusBar (25), etc.
+        level = .screenSaver
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
 
         // Keep it alive
@@ -100,6 +101,21 @@ final class OverlayWindowManager: ObservableObject {
     func setContent<V: View>(@ViewBuilder _ content: () -> V) {
         let view = content()
         for window in windows.values {
+            let hostView = NSHostingView(rootView: view)
+            hostView.wantsLayer = true
+            hostView.layer?.backgroundColor = .clear
+            window.contentView = hostView
+        }
+    }
+
+    /// Sets per-screen SwiftUI content. The closure receives the screen frame
+    /// for each overlay window so each screen gets its own view instance that
+    /// knows which screen it covers.
+    func setPerScreenContent<V: View>(@ViewBuilder _ content: (_ screenFrame: CGRect) -> V) {
+        for (displayID, window) in windows {
+            let screen = NSScreen.screens.first(where: { $0.displayID == displayID })
+            let frame = screen?.frame ?? window.frame
+            let view = content(frame)
             let hostView = NSHostingView(rootView: view)
             hostView.wantsLayer = true
             hostView.layer?.backgroundColor = .clear

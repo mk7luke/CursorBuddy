@@ -1,49 +1,54 @@
 import AppKit
 import AVFoundation
 import CoreGraphics
-import ScreenCaptureKit
 import Speech
 
 enum CompanionPermissionCenter {
+    /// UserDefaults key for persisting a known-good screen recording grant.
+    /// CGPreflightScreenCaptureAccess() can return false negatives after app
+    /// restarts even when the user has already approved the app in System
+    /// Settings. Once we confirm the permission is granted, we persist that
+    /// so future launches don't incorrectly show "not granted".
+    private static let screenRecordingConfirmedKey = "com.pucks.hasPreviouslyConfirmedScreenRecordingPermission"
+
     static func hasMicrophonePermission() -> Bool {
         AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
     }
 
     static func hasScreenRecordingPermission() -> Bool {
-        // macOS 10.15+: CGPreflightScreenCaptureAccess is the official pre-check
-        if #available(macOS 10.15, *) {
-            if CGPreflightScreenCaptureAccess() {
-                return true
-            }
+        // CGPreflightScreenCaptureAccess is the official check (macOS 10.15+).
+        // Do NOT use CGWindowListCopyWindowInfo as a fallback — it gives false
+        // positives/negatives and can trigger permission prompts on some versions.
+        let hasPermissionNow = CGPreflightScreenCaptureAccess()
+        if hasPermissionNow {
+            // Persist the known-good state so false negatives on future launches
+            // don't reset the permission UI and force the user to re-grant.
+            UserDefaults.standard.set(true, forKey: screenRecordingConfirmedKey)
         }
+        return hasPermissionNow
+    }
 
-        // Fallback: try to enumerate windows. If we can read window names, permission is granted.
-        // This is a heuristic that works on older macOS versions.
-        let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+    /// Returns true when the app should treat screen recording as granted for
+    /// session purposes. Falls back to the last known granted state because
+    /// CGPreflightScreenCaptureAccess() can return false negatives even when
+    /// the user has already approved the app. This prevents permissions from
+    /// appearing to "reset" on every app restart.
+    static func shouldTreatScreenRecordingAsGranted() -> Bool {
+        hasScreenRecordingPermission()
+            || UserDefaults.standard.bool(forKey: screenRecordingConfirmedKey)
+    }
 
-        // When screen recording is granted, on-screen windows usually include readable names/owners.
-        return windowList.contains {
-            let name = ($0[kCGWindowName as String] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let owner = ($0[kCGWindowOwnerName as String] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            return !(name?.isEmpty ?? true) || !(owner?.isEmpty ?? true)
-        }
+    /// Clears the persisted screen recording confirmation. Call this only when
+    /// a capture actually fails with a permission error, which means the user
+    /// genuinely revoked the permission.
+    static func clearScreenRecordingConfirmation() {
+        UserDefaults.standard.removeObject(forKey: screenRecordingConfirmedKey)
     }
 
     static func hasScreenRecordingPermissionAsync() async -> Bool {
-        if hasScreenRecordingPermission() {
-            return true
-        }
-
-        if #available(macOS 13.0, *) {
-            do {
-                let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-                return !content.displays.isEmpty
-            } catch {
-                return false
-            }
-        }
-
-        return hasScreenRecordingPermission()
+        // Just use the synchronous check. Do NOT call SCShareableContent here —
+        // it can trigger a permission prompt dialog, which is the opposite of a check.
+        return shouldTreatScreenRecordingAsGranted()
     }
 
     static func hasAccessibilityPermission() -> Bool {
@@ -63,15 +68,11 @@ enum CompanionPermissionCenter {
     }
 
     static func requestScreenRecordingPermission() {
-        if #available(macOS 11.0, *) {
-            let granted = CGRequestScreenCaptureAccess()
-            if granted { return }
-        }
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-            if !hasScreenRecordingPermission() {
-                openSystemSettingsPrivacyPane(anchor: "Privacy_ScreenCapture")
-            }
+        // Go straight to System Settings. CGRequestScreenCaptureAccess() can
+        // trigger repeated system dialogs and doesn't reliably grant permission
+        // on newer macOS versions anyway.
+        if !hasScreenRecordingPermission() {
+            openSystemSettingsPrivacyPane(anchor: "Privacy_ScreenCapture")
         }
     }
 

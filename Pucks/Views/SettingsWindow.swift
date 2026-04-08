@@ -895,9 +895,7 @@ struct PermissionsSettingsView: View {
         micGranted = CompanionPermissionCenter.hasMicrophonePermission()
         accessibilityGranted = CompanionPermissionCenter.hasAccessibilityPermission()
         speechGranted = CompanionPermissionCenter.hasSpeechRecognitionPermission()
-        Task {
-            screenGranted = await CompanionPermissionCenter.hasScreenRecordingPermissionAsync()
-        }
+        screenGranted = CompanionPermissionCenter.shouldTreatScreenRecordingAsGranted()
     }
 
     private func requestMic() {
@@ -909,12 +907,14 @@ struct PermissionsSettingsView: View {
     private func requestScreen() {
         SettingsWindowController.shared.temporarilyLowerLevel()
         CompanionPermissionCenter.requestScreenRecordingPermission()
-        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
-            NSWorkspace.shared.open(url)
-        }
+        // Poll for the user to grant in System Settings
         Task {
-            try? await Task.sleep(nanoseconds: 1_500_000_000)
-            screenGranted = await CompanionPermissionCenter.hasScreenRecordingPermissionAsync()
+            for _ in 0..<30 {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                let granted = CompanionPermissionCenter.shouldTreatScreenRecordingAsGranted()
+                await MainActor.run { screenGranted = granted }
+                if granted { break }
+            }
         }
     }
 

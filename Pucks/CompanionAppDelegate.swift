@@ -245,11 +245,14 @@ class CompanionAppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         overlayManager: OverlayWindowManager,
         voiceState: VoiceStateObservable
     ) {
-        overlayManager.setContent {
+        // Each screen gets its own CursorOverlayView with that screen's frame,
+        // so the cursor only renders on the screen where the mouse actually is.
+        overlayManager.setPerScreenContent { screenFrame in
             CursorOverlayView(
                 detector: detector,
                 voiceState: voiceState,
-                selectedTextMonitor: selectedTextMonitor
+                selectedTextMonitor: selectedTextMonitor,
+                screenFrame: screenFrame
             )
         }
         overlayManager.overlayMode = .idle

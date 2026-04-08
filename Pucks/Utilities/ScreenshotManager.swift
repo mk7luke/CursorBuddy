@@ -22,7 +22,7 @@ struct ScreenCapture {
         let bitmapRep = NSBitmapImageRep(cgImage: cgImage)
         guard let jpegData = bitmapRep.representation(
             using: .jpeg,
-            properties: [.compressionFactor: 0.7]
+            properties: [.compressionFactor: 0.5]
         ) else { return nil }
         return jpegData.base64EncodedString()
     }
@@ -70,25 +70,23 @@ class CompanionScreenCapture {
 
     // MARK: - Permission Check
 
-    /// Check if we have screen recording permission
+    /// Check if we have screen recording permission.
+    /// Delegates to CompanionPermissionCenter — single source of truth.
     func hasScreenRecordingPermission() -> Bool {
-        // Attempt to create a small capture to test permission
-        // CGWindowListCopyWindowInfo requires screen recording permission on macOS 10.15+
-        let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]]
-        return windowList != nil
+        CompanionPermissionCenter.shouldTreatScreenRecordingAsGranted()
     }
 
-    /// Request screen recording permission by triggering the system prompt
+    /// Request screen recording permission.
     func requestScreenRecordingPermission() {
-        // Triggering a capture attempt will show the system permission dialog
-        let _ = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID)
-        print("[ScreenCapture] Screen recording permission requested.")
+        CompanionPermissionCenter.requestScreenRecordingPermission()
     }
 
     // MARK: - Capture
 
-    /// Capture all displays, labeling the primary (cursor) display as 'primary focus'
-    func captureScreen() async throws -> [ScreenCapture] {
+    /// Capture the primary display. When `cursorAreaOnly` is true, crops to an 800x600
+    /// region around the cursor for faster inference on contextual "what is this?" questions.
+    /// Falls back to full-screen if the crop would be too small.
+    func captureScreen(cursorAreaOnly: Bool = false) async throws -> [ScreenCapture] {
         let content: SCShareableContent
         do {
             content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
@@ -147,12 +145,24 @@ class CompanionScreenCapture {
                     cursorScreenPos: cgCursorPos,
                     displayBounds: CGDisplayBounds(display.displayID)
                 )
-                
-                let data = imageToJPEGData(imageWithCursorHighlight) ?? Data()
+
+                // If cursor-area-only mode, crop to a region around the cursor
+                let finalImage: CGImage
+                if cursorAreaOnly {
+                    finalImage = cropAroundCursor(
+                        image: imageWithCursorHighlight,
+                        cursorScreenPos: cgCursorPos,
+                        displayBounds: CGDisplayBounds(display.displayID)
+                    )
+                } else {
+                    finalImage = imageWithCursorHighlight
+                }
+
+                let data = imageToJPEGData(finalImage) ?? Data()
 
                 // Use actual captured image dimensions (what Claude will see)
-                let actualW = imageWithCursorHighlight.width
-                let actualH = imageWithCursorHighlight.height
+                let actualW = finalImage.width
+                let actualH = finalImage.height
 
                 // Find the NSScreen for this display to get the screen frame
                 let screenFrame = NSScreen.screens.first(where: {
@@ -191,6 +201,36 @@ class CompanionScreenCapture {
         }
 
         return captures
+    }
+
+    // MARK: - Cursor Area Cropping
+
+    /// Crops the screenshot to an 800x600 region centered on the cursor.
+    /// If the cursor is near an edge, the crop shifts to stay within bounds.
+    private func cropAroundCursor(image: CGImage, cursorScreenPos: CGPoint, displayBounds: CGRect) -> CGImage {
+        let cropWidth = 800
+        let cropHeight = 600
+        let imageW = image.width
+        let imageH = image.height
+
+        // Convert cursor screen position to image pixel coordinates
+        let cursorPixelX = Int((cursorScreenPos.x - displayBounds.origin.x) / displayBounds.width * CGFloat(imageW))
+        let cursorPixelY = Int((cursorScreenPos.y - displayBounds.origin.y) / displayBounds.height * CGFloat(imageH))
+
+        // If the image is smaller than the crop size, skip cropping
+        guard imageW > cropWidth && imageH > cropHeight else { return image }
+
+        // Center the crop on the cursor, clamping to image bounds
+        var originX = cursorPixelX - cropWidth / 2
+        var originY = cursorPixelY - cropHeight / 2
+        originX = max(0, min(originX, imageW - cropWidth))
+        originY = max(0, min(originY, imageH - cropHeight))
+
+        let cropRect = CGRect(x: originX, y: originY, width: cropWidth, height: cropHeight)
+        guard let cropped = image.cropping(to: cropRect) else { return image }
+
+        print("[ScreenCapture] Cursor-area crop: \(imageW)x\(imageH) → \(cropWidth)x\(cropHeight) at (\(originX), \(originY))")
+        return cropped
     }
 
     // MARK: - Helpers
@@ -251,7 +291,7 @@ class CompanionScreenCapture {
         let bitmapRep = NSBitmapImageRep(cgImage: image)
         return bitmapRep.representation(
             using: .jpeg,
-            properties: [.compressionFactor: 0.7]
+            properties: [.compressionFactor: 0.5]
         )
     }
     

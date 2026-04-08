@@ -280,16 +280,6 @@ struct CompanionPanelView: View {
                 .padding(.horizontal, 12)
                 .padding(.top, 4)
                 .frame(maxHeight: .infinity)
-                .mask(
-                    VStack(spacing: 0) {
-                        LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom)
-                            .frame(height: 20)
-                        Color.black
-                        LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom)
-                            .frame(height: 20)
-                    }
-                )
-                .clipped()
 
             // Thinking indicator
             if companionManager.voiceState == .thinking {
@@ -514,26 +504,47 @@ struct CompanionPanelView: View {
                             emptyConversationPlaceholder
                         } else {
                             ForEach(companionManager.conversationHistory) { turn in
-                            VStack(spacing: 6) {
-                                // User message — right aligned
-                                HStack {
-                                    Spacer(minLength: 48)
-                                    messageBubble(turn.userTranscript, isUser: true, turn: turn)
-                                }
+                                VStack(spacing: 6) {
+                                    // User message — right aligned
+                                    HStack {
+                                        Spacer(minLength: 48)
+                                        messageBubble(turn.userTranscript, isUser: true, turn: turn)
+                                    }
 
-                                // Assistant response — left aligned
-                                HStack {
-                                    messageBubble(turn.assistantResponse, isUser: false, turn: turn)
-                                    Spacer(minLength: 48)
+                                    // Assistant response — left aligned
+                                    HStack {
+                                        messageBubble(turn.assistantResponse, isUser: false, turn: turn)
+                                        Spacer(minLength: 48)
+                                    }
                                 }
+                                .id(turn.id)
                             }
-                            .id(turn.id)
                         }
                     }
+                    .padding(.vertical, 4)
                 }
-                .padding(.vertical, 4)
-            }
                 .scrollIndicators(.hidden)
+                // Fade messages out before they reach the top/bottom edges
+                // so they don't clip behind the header bar or mic button chin.
+                .mask(
+                    VStack(spacing: 0) {
+                        LinearGradient(
+                            colors: [.clear, .black],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                        .frame(height: 32)
+
+                        Color.black
+
+                        LinearGradient(
+                            colors: [.black, .clear],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                        .frame(height: 32)
+                    }
+                )
                 .onChange(of: companionManager.conversationHistory.count) {
                     if let last = companionManager.conversationHistory.last {
                         withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
@@ -970,16 +981,10 @@ struct CompanionPanelView: View {
         hasMicrophonePermission = CompanionPermissionCenter.hasMicrophonePermission()
         hasAccessibilityPermission = CompanionPermissionCenter.hasAccessibilityPermission()
         hasSpeechRecognitionPermission = CompanionPermissionCenter.hasSpeechRecognitionPermission()
-        Task {
-            let granted = await CompanionPermissionCenter.hasScreenRecordingPermissionAsync()
-            await MainActor.run {
-                hasScreenRecordingPermission = granted
-                // Auto-complete onboarding if all permissions are already granted
-                if allPermissionsGranted && !hasCompletedOnboarding {
-                    hasCompletedOnboarding = true
-                    UserDefaults.standard.set(true, forKey: "hasCompletedOnboarding")
-                }
-            }
+        hasScreenRecordingPermission = CompanionPermissionCenter.shouldTreatScreenRecordingAsGranted()
+        if allPermissionsGranted && !hasCompletedOnboarding {
+            hasCompletedOnboarding = true
+            UserDefaults.standard.set(true, forKey: "hasCompletedOnboarding")
         }
     }
 
@@ -991,13 +996,14 @@ struct CompanionPanelView: View {
 
     private func requestScreenRecordingPermission() {
         CompanionPermissionCenter.requestScreenRecordingPermission()
+        // Poll for the user to grant permission in System Settings
         screenPermissionPollTask?.cancel()
         screenPermissionPollTask = Task {
-            for _ in 0..<12 {
-                let granted = await CompanionPermissionCenter.hasScreenRecordingPermissionAsync()
+            for _ in 0..<30 {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                let granted = CompanionPermissionCenter.shouldTreatScreenRecordingAsGranted()
                 await MainActor.run { hasScreenRecordingPermission = granted }
                 if granted { break }
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
             }
         }
     }

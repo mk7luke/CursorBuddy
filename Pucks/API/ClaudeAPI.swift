@@ -9,9 +9,7 @@ class ClaudeAPI {
 
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.pucks", category: "ClaudeAPI")
 
-    private let primaryModel = "claude-sonnet-4-6"
-    private let fallbackModels = ["claude-opus-4-6", "claude-haiku-4-5-20251001"]
-    private let overloadRetryBaseDelayNanoseconds: UInt64 = 500_000_000
+    private let model = "claude-sonnet-4-6"
 
     private let systemPrompt = """
 you're pucks, a friendly always-on companion that lives in the user's menu bar. the user just spoke to you via push-to-talk and you can see their screen(s). your reply will be spoken aloud via text-to-speech, so write the way you'd actually talk. this is an ongoing conversation
@@ -64,31 +62,14 @@ format: [POINT:x,y:label] where x,y are integer pixel coordinates in the screens
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
-                    let models = [self.primaryModel] + self.fallbackModels
-                    for modelIndex in models.indices {
-                        do {
-                            try await self.sendMessageWithModel(
-                                model: models[modelIndex],
-                                messages: messages,
-                                screenshots: screenshots,
-                                screenLabels: screenLabels,
-                                continuation: continuation
-                            )
-                            self.logger.info("Claude request succeeded with model: \(models[modelIndex], privacy: .public)")
-                            continuation.finish()
-                            return
-                        } catch {
-                            let nsError = error as NSError
-                            let isOverloaded = nsError.domain == "ClaudeAPI" && nsError.code == 529
-                            if isOverloaded && modelIndex < models.count - 1 {
-                                let delay = overloadRetryBaseDelayNanoseconds * UInt64(modelIndex + 1)
-                                self.logger.error("Model \(models[modelIndex], privacy: .public) failed with overload; retrying next model in \(Double(delay) / 1_000_000_000, privacy: .public)s")
-                                try? await Task.sleep(nanoseconds: delay)
-                                continue
-                            }
-                            throw error
-                        }
-                    }
+                    try await self.sendMessageWithModel(
+                        model: self.model,
+                        messages: messages,
+                        screenshots: screenshots,
+                        screenLabels: screenLabels,
+                        continuation: continuation
+                    )
+                    continuation.finish()
                 } catch {
                     self.logger.error("Claude API error: \(error.localizedDescription, privacy: .public)")
                     continuation.finish(throwing: error)
@@ -158,7 +139,7 @@ format: [POINT:x,y:label] where x,y are integer pixel coordinates in the screens
         }
 
         let body: [String: Any] = [
-            "model": model,
+            "model": model,                          
             "max_tokens": 4096,
             "stream": true,
             "system": self.systemPrompt,

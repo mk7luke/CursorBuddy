@@ -21,13 +21,25 @@ final class PushToTalkShortcutConfiguration: ObservableObject {
 
     private static let keyCodeUserDefaultsKey = "pushToTalkShortcutKeyCode"
     private static let modifiersUserDefaultsKey = "pushToTalkShortcutModifiers"
+    private static let defaultKeyCode = UInt32(kVK_Option)
+    private static let defaultModifiers = UInt32(controlKey)
+    private static let legacyDefaultKeyCode = UInt32(kVK_Space)
+    private static let legacyDefaultModifiers = UInt32(optionKey)
+    private static let legacyDefaultWithControlKeyCode = UInt32(kVK_Space)
+    private static let legacyDefaultWithControlModifiers = UInt32(controlKey | optionKey)
 
     private init() {
         let storedKeyCode = UserDefaults.standard.object(forKey: Self.keyCodeUserDefaultsKey) as? UInt32
         let storedModifiers = UserDefaults.standard.object(forKey: Self.modifiersUserDefaultsKey) as? UInt32
 
-        self.keyCode = storedKeyCode ?? UInt32(kVK_Space)
-        self.modifiers = storedModifiers ?? UInt32(optionKey)
+        if (storedKeyCode == Self.legacyDefaultKeyCode && storedModifiers == Self.legacyDefaultModifiers)
+            || (storedKeyCode == Self.legacyDefaultWithControlKeyCode && storedModifiers == Self.legacyDefaultWithControlModifiers) {
+            self.keyCode = Self.defaultKeyCode
+            self.modifiers = Self.defaultModifiers
+        } else {
+            self.keyCode = storedKeyCode ?? Self.defaultKeyCode
+            self.modifiers = storedModifiers ?? Self.defaultModifiers
+        }
     }
 
     func update(keyCode: UInt32, modifiers: UInt32) {
@@ -36,7 +48,7 @@ final class PushToTalkShortcutConfiguration: ObservableObject {
     }
 
     func resetToDefault() {
-        update(keyCode: UInt32(kVK_Space), modifiers: UInt32(optionKey))
+        update(keyCode: Self.defaultKeyCode, modifiers: Self.defaultModifiers)
     }
 
     private func persistAndNotify() {
@@ -66,6 +78,10 @@ final class PushToTalkShortcutConfiguration: ObservableObject {
 
     private static func keyName(for keyCode: UInt32) -> String {
         switch Int(keyCode) {
+        case kVK_Option: return "Opt"
+        case kVK_RightOption: return "Right Opt"
+        case kVK_Control: return "Ctrl"
+        case kVK_RightControl: return "Right Ctrl"
         case kVK_Space: return "Space"
         case kVK_Return: return "Return"
         case kVK_Tab: return "Tab"
