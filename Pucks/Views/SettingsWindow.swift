@@ -4,6 +4,7 @@ import Carbon
 
 // MARK: - Settings Window Controller
 
+@MainActor
 final class SettingsWindowController: NSObject, @unchecked Sendable {
     static let shared = SettingsWindowController()
 
@@ -24,13 +25,12 @@ final class SettingsWindowController: NSObject, @unchecked Sendable {
         super.init()
         win.delegate = nil  // prevent retain cycle
 
-        Task { @MainActor in
-            let manager = CompanionAppDelegate.shared.companionManager ?? CompanionManager()
-            let settingsView = SettingsView()
-                .environmentObject(manager)
-            let hosting = NSHostingView(rootView: settingsView)
-            self.settingsWindow.contentView = hosting
-        }
+        // Set content synchronously so window isn't empty on first show
+        let manager = CompanionAppDelegate.shared.companionManager ?? CompanionManager()
+        let settingsView = SettingsView()
+            .environmentObject(manager)
+        let hosting = NSHostingView(rootView: settingsView)
+        win.contentView = hosting
     }
 
     func show() {

@@ -35,6 +35,9 @@ fi
 # Create app bundle structure
 mkdir -p "$MACOS_DIR" "$RES_DIR"
 
+# Copy Sparkle framework next to binary (binary uses @loader_path for rpath)
+cp -r .build/debug/Sparkle.framework "$MACOS_DIR/Sparkle.framework"
+
 # Copy binary
 cp .build/debug/Pucks "$MACOS_DIR/Pucks"
 
@@ -47,19 +50,23 @@ cp Pucks/Pucks.entitlements /tmp/Pucks.entitlements
 # Copy resources (icon, sounds, etc)
 cp Pucks/Resources/* "$RES_DIR/" 2>/dev/null || true
 
+# Sign Sparkle framework separately first (avoids ambiguous bundle error with --deep)
+if [ -d "$MACOS_DIR/Sparkle.framework" ]; then
+    echo "Signing Sparkle framework..."
+    codesign --force --sign "$SIGNING_IDENTITY" "$MACOS_DIR/Sparkle.framework" 2>/dev/null || true
+fi
+
 # Codesign with stable identity + explicit bundle identifier.
-# --identifier ensures TCC database key stays consistent.
-# NO --options runtime (hardened runtime) for dev builds — this is
-# critical for TCC permissions persisting across rebuilds.
+# Sign WITHOUT --deep first, then verify (--deep on app with embedded frameworks causes ambiguity errors)
 echo "Signing with identity: $SIGNING_IDENTITY"
-codesign --force --deep \
+codesign --force \
     --sign "$SIGNING_IDENTITY" \
     --identifier "$BUNDLE_ID" \
     --entitlements /tmp/Pucks.entitlements \
     "$APP_PATH"
 
 # Verify the signature
-if codesign --verify --deep --strict "$APP_PATH" 2>/dev/null; then
+if codesign --verify --strict "$APP_PATH" 2>/dev/null; then
     echo "✓ Signature verified: $APP_PATH"
 else
     echo "⚠ Signature verification failed — permissions may not persist"

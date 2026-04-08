@@ -369,6 +369,27 @@ struct CompanionPanelView: View {
     private var settingsTabView: some View {
         ScrollView {
             VStack(spacing: 8) {
+                // Full Settings button
+                Button {
+                    SettingsWindowController.shared.show()
+                } label: {
+                    HStack {
+                        Image(systemName: "gearshape.fill")
+                            .font(.system(size: 12))
+                        Text("Full Settings...")
+                            .font(.system(size: 13, weight: .medium))
+                        Spacer()
+                        Image(systemName: "arrow.up.right")
+                            .font(.system(size: 10))
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background { RoundedRectangle(cornerRadius: 8).fill(Color.accentColor.opacity(0.25)) }
+                    .overlay { RoundedRectangle(cornerRadius: 8).stroke(Color.accentColor.opacity(0.4), lineWidth: 1) }
+                }
+                .buttonStyle(.plain)
+
                 permissionsSettingsSection
                 shortcutSettingsSection
                 cursorSettingsSection

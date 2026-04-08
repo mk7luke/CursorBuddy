@@ -83,7 +83,7 @@ final class PermissionMonitor: ObservableObject {
 
     private func checkForChanges() {
         let prevMic = microphonePermission
-        let prevScreen = screenRecordingPermission
+        _ = screenRecordingPermission
         let prevAccessibility = accessibilityPermission
         let prevSpeech = speechRecognitionPermission
 

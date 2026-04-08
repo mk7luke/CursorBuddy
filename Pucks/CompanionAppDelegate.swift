@@ -118,6 +118,8 @@ class CompanionAppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         let viewMenu = NSMenu(title: "View")
         viewMenu.addItem(NSMenuItem(title: "Toggle Panel", action: #selector(togglePanel), keyEquivalent: "p"))
         viewMenu.addItem(NSMenuItem(title: "Toggle Lens", action: #selector(toggleLens), keyEquivalent: "l"))
+        viewMenu.addItem(NSMenuItem.separator())
+        viewMenu.addItem(NSMenuItem(title: "Full Settings…", action: #selector(showSettings), keyEquivalent: ","))
         viewMenuItem.submenu = viewMenu
         mainMenu.addItem(viewMenuItem)
 
@@ -149,10 +151,8 @@ class CompanionAppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         NSApp.orderFrontStandardAboutPanel(nil)
     }
 
-    @objc private func showSettings() {
-        Task { @MainActor in
-            SettingsWindowController.shared.show()
-        }
+    @objc func showSettings() {
+        SettingsWindowController.shared.show()
     }
 
     @objc private func showHelp() {
