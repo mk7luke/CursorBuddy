@@ -234,14 +234,12 @@ struct APIKeysSettingsView: View {
     @State private var deepgramKey: String = APIKeysManager.shared.deepgramKey ?? ""
     @State private var assemblyAIKey: String = APIKeysManager.shared.assemblyAIKey ?? ""
 
-    @State private var showSaveAlert = false
-
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("API Keys")
                 .font(.system(size: 18, weight: .semibold))
 
-            Text("Keys are stored in ~/.cursorbuddy/keys.json. For production, use environment variables.")
+            Text("Keys are stored in ~/.cursorbuddy/keys.json and save automatically.")
                 .font(.system(size: 12))
                 .foregroundColor(.white.opacity(0.5))
                 .fixedSize(horizontal: false, vertical: true)
@@ -256,17 +254,14 @@ struct APIKeysSettingsView: View {
                 keyRow(title: "Deepgram", subtitle: "Streaming speech-to-text with VAD", key: $deepgramKey)
                 keyRow(title: "AssemblyAI", subtitle: "Streaming speech-to-text", key: $assemblyAIKey)
             }
-
-            HStack {
-                Spacer()
-                Button("Save Keys") {
-                    saveKeys()
-                }
-                .buttonStyle(.glassProminent)
-                .tint(.blue)
-            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .onChange(of: anthropicKey) { _, _ in saveKeys() }
+        .onChange(of: openAIKey) { _, _ in saveKeys() }
+        .onChange(of: elevenLabsKey) { _, _ in saveKeys() }
+        .onChange(of: cartesiaKey) { _, _ in saveKeys() }
+        .onChange(of: deepgramKey) { _, _ in saveKeys() }
+        .onChange(of: assemblyAIKey) { _, _ in saveKeys() }
     }
 
     @ViewBuilder
@@ -305,10 +300,6 @@ struct APIKeysSettingsView: View {
             deepgramKey: deepgramKey.isEmpty ? nil : deepgramKey,
             assemblyAIKey: assemblyAIKey.isEmpty ? nil : assemblyAIKey
         )
-        showSaveAlert = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-            showSaveAlert = false
-        }
     }
 }
 

@@ -71,7 +71,7 @@ struct CompanionPanelView: View {
     @State private var isCompact: Bool = false
 
     var body: some View {
-        GlassEffectContainer(spacing: 0) {
+        VStack(spacing: 0) {
             VStack(spacing: 0) {
                 if !isCompact {
                     panelHeader
@@ -259,72 +259,26 @@ struct CompanionPanelView: View {
 
     private var fullChatLayout: some View {
         VStack(spacing: 0) {
-            // ═══ FIXED HEADER ═══
-            VStack(spacing: 4) {
-                if !allPermissionsGranted {
-                    permissionsWarningBanner
-                        .padding(.horizontal, 12)
-                }
-                if selectedTextMonitor.hasSelection {
-                    selectedTextCard
-                        .padding(.horizontal, 12)
-                }
-            }
-            .padding(.top, 4)
-
-            // ═══ SCROLLABLE MESSAGES (fills all remaining space) ═══
-            chatMessagesScrollView
-                .padding(.horizontal, 12)
-
-            // ═══ FIXED FOOTER (chin) ═══
-            VStack(spacing: 4) {
-                // Thinking indicator
-                if companionManager.voiceState == .thinking {
-                    thinkingIndicator
-                        .padding(.horizontal, 12)
-                }
-
-                // Active transcript
-                if !companionManager.activeTurnTranscriptText.isEmpty {
-                    activeTranscriptView
-                        .padding(.horizontal, 12)
-                }
-
-                // Screenshot intercept
-                if companionManager.screenshotInterceptor.pendingScreenshot != nil {
-                    screenshotInterceptCard
-                        .padding(.horizontal, 12)
-                }
-
-                // Attached screenshots
-                if !companionManager.attachedScreenshots.isEmpty {
-                    attachedScreenshotsRow
-                        .padding(.horizontal, 12)
-                }
-
-                // Microphone
-                microphoneSection
+            // ═══ INLINE ALERTS (above messages) ═══
+            if !allPermissionsGranted {
+                permissionsWarningBanner
                     .padding(.horizontal, 12)
-                    .padding(.bottom, 8)
+                    .padding(.top, 4)
             }
-            .padding(.top, 4)
-        }
-    }
+            if selectedTextMonitor.hasSelection {
+                selectedTextCard
+                    .padding(.horizontal, 12)
+                    .padding(.top, 4)
+            }
 
-    // MARK: - Chat Messages Scroll View
-
-    private var chatMessagesScrollView: some View {
-        ZStack {
+            // ═══ SCROLLABLE MESSAGES ═══
+            // This is the ONLY flexible element — it takes all remaining space.
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 10) {
-                        // Top spacer so content doesn't start flush against fade
-                        Color.clear.frame(height: 8)
-
                         if companionManager.conversationHistory.isEmpty {
                             emptyConversationPlaceholder
                         } else {
-                            // Clear button
                             HStack {
                                 Spacer()
                                 Button {
@@ -355,11 +309,10 @@ struct CompanionPanelView: View {
                                 .id(turn.id)
                             }
                         }
-
-                        // Bottom spacer so content doesn't end flush against fade
-                        Color.clear.frame(height: 8)
                     }
-                    .padding(.vertical, 4)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 8)
+                    .padding(.bottom, 8)
                 }
                 .scrollIndicators(.hidden)
                 .onChange(of: companionManager.conversationHistory.count) {
@@ -368,31 +321,36 @@ struct CompanionPanelView: View {
                     }
                 }
             }
+            .frame(maxHeight: .infinity)
 
-            // Fade edges so messages don't hard-clip against header/footer
-            VStack {
-                LinearGradient(
-                    colors: [.black, .clear],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-                .frame(height: 24)
-                .allowsHitTesting(false)
-
-                Spacer()
-
-                LinearGradient(
-                    colors: [.clear, .black],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-                .frame(height: 24)
-                .allowsHitTesting(false)
+            // ═══ FIXED FOOTER (chin) ═══
+            // This has a fixed height — it never scrolls, never gets overlapped.
+            VStack(spacing: 4) {
+                if companionManager.voiceState == .thinking {
+                    thinkingIndicator
+                        .padding(.horizontal, 12)
+                }
+                if !companionManager.activeTurnTranscriptText.isEmpty {
+                    activeTranscriptView
+                        .padding(.horizontal, 12)
+                }
+                if companionManager.screenshotInterceptor.pendingScreenshot != nil {
+                    screenshotInterceptCard
+                        .padding(.horizontal, 12)
+                }
+                if !companionManager.attachedScreenshots.isEmpty {
+                    attachedScreenshotsRow
+                        .padding(.horizontal, 12)
+                }
+                microphoneSection
+                    .padding(.horizontal, 12)
             }
-            .blendMode(.destinationOut)
+            .padding(.top, 6)
+            .padding(.bottom, 8)
         }
-        .compositingGroup()
     }
+
+    // conversationSection replaced by inline ScrollView in fullChatLayout
 
     // MARK: Compact (short/wide) chat layout
 
