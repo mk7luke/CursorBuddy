@@ -693,13 +693,23 @@ app.on("before-quit", () => {
 app.whenReady().then(() => {
   if (process.platform === "darwin") app.dock.hide();
 
+  // ── Permission grants (mic access for PTT, etc.) ────────────
+  session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
+    const allowed = ["media", "audioCapture", "microphone"];
+    callback(allowed.includes(permission));
+  });
+  session.defaultSession.setPermissionCheckHandler((_webContents, permission) => {
+    const allowed = ["media", "audioCapture", "microphone"];
+    return allowed.includes(permission);
+  });
+
   // ── CSP Header ──────────────────────────────────────────────
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
     callback({
       responseHeaders: {
         ...details.responseHeaders,
         "Content-Security-Policy": [
-          "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://unpkg.com; img-src 'self' data: blob:; connect-src 'self' ws: wss: http://localhost:* http://127.0.0.1:*; font-src 'self' https://unpkg.com"
+          "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://unpkg.com; img-src 'self' data: blob:; media-src 'self' blob: data:; connect-src 'self' ws: wss: http://localhost:* http://127.0.0.1:*; font-src 'self' https://unpkg.com; worker-src 'self' blob:"
         ],
       },
     });
