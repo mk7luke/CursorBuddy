@@ -10,6 +10,10 @@
  */
 
 const { app, BrowserWindow, Tray, Menu, screen, ipcMain, nativeImage, globalShortcut, clipboard, session } = require("electron");
+// Disable Chromium's autoplay policy process-wide so the panel can play
+// TTS audio chunks for global push-to-talk responses even when it hasn't
+// received a direct user gesture. Must be set before app.ready.
+app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
 const path = require("path");
 const { createHash } = require("crypto");
 const { execFile } = require("child_process");
@@ -160,34 +164,107 @@ function positionPanelNearTray(trayBounds) {
 // ── Windows ───────────────────────────────────────────────────
 
 function createOverlayWindow() {
-  const isDev = !app.isPackaged;
-  const overlayWindow = new BrowserWindow({
+  const distIndex = path.join(__dirname, "../dist/index.html");
+  const devServerUrl = process.env.ELECTRON_DEV_SERVER_URL;
+  const useDevServer = !!devServerUrl || (!app.isPackaged && !require("fs").existsSync(distIndex));
+  const isMac = process.platform === "darwin";
+  // Debug knob: set OVERLAY_DEBUG=1 to make the overlay window opaque and
+  // positioned visibly. Use this to verify window creation works when the
+  // transparent overlay is invisible for some reason.
+  const debugOpaque = process.env.OVERLAY_DEBUG === "1";
+  const overlayOpts = {
     width: VIEWPORT_WIDTH,
     height: VIEWPORT_HEIGHT,
-    transparent: true,
-    frame: false,
+    x: debugOpaque ? 200 : 0,
+    y: debugOpaque ? 200 : 0,
+    transparent: !debugOpaque,
+    frame: debugOpaque,
     alwaysOnTop: true,
-    skipTaskbar: true,
+    skipTaskbar: !debugOpaque,
     hasShadow: false,
     resizable: false,
-    focusable: false,
-    type: "panel",
+    // On Windows, focusable:false can prevent transparent frameless windows
+    // from ever painting. Only use it on macOS where the panel type handles
+    // click-through focus behavior.
+    focusable: isMac ? false : true,
+    // Fully transparent background — required on Windows for transparent
+    // frameless windows to actually composite as transparent.
+    backgroundColor: debugOpaque ? "#FF0000" : "#00000000",
+    show: false,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      // The overlay never has focus (focusable:false on mac, click-through on win).
+      // Without this, Electron throttles requestAnimationFrame to ~1Hz when the
+      // window isn't focused, which freezes the cursor-tracking spring loop the
+      // moment the user opens the panel.
+      backgroundThrottling: false,
     },
+  };
+  // type: "panel" is a macOS-only option; on Windows it's not a valid value
+  // and can interfere with window visibility.
+  if (isMac) overlayOpts.type = "panel";
+  const overlayWindow = new BrowserWindow(overlayOpts);
+  log.event("overlay:created", {
+    bounds: overlayWindow.getBounds(),
+    debugOpaque,
+    platform: process.platform,
   });
-  overlayWindow.setIgnoreMouseEvents(true);
-  overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-  overlayWindow.setAlwaysOnTop(true, "screen-saver");
-  if (isDev) {
-    overlayWindow.loadURL("http://localhost:1420");
-  } else {
-    overlayWindow.loadFile(path.join(__dirname, "../dist/index.html"));
+  if (!debugOpaque) {
+    overlayWindow.setIgnoreMouseEvents(true);
   }
-  overlayWindow.webContents.on("did-finish-load", () => broadcastScreenBounds());
+  if (isMac) {
+    overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  }
+  // Use the "screen-saver" z-order level on both platforms so the overlay
+  // sits above the panel (which uses the default "floating" level) — without
+  // this, opening the panel covers the cursor overlay.
+  overlayWindow.setAlwaysOnTop(true, "screen-saver");
+
+  overlayWindow.webContents.on("did-fail-load", (_ev, errCode, errDesc, url) => {
+    log.event("overlay:did-fail-load", { errCode, errDesc, url });
+  });
+  overlayWindow.once("ready-to-show", () => {
+    log.event("overlay:ready-to-show", { bounds: overlayWindow.getBounds() });
+    overlayWindow.showInactive();
+  });
+  overlayWindow.on("show", () => {
+    log.event("overlay:shown", {
+      bounds: overlayWindow.getBounds(),
+      visible: overlayWindow.isVisible(),
+    });
+  });
+  overlayWindow.webContents.on("console-message", (_ev, level, msg, line, sourceId) => {
+    log.event("overlay:console", { level, msg, line, sourceId });
+  });
+  overlayWindow.webContents.on("render-process-gone", (_ev, details) => {
+    log.event("overlay:render-gone", details);
+  });
+
+  if (useDevServer) {
+    overlayWindow.loadURL(devServerUrl || "http://localhost:1420");
+  } else {
+    overlayWindow.loadFile(distIndex);
+  }
+  if (debugOpaque) {
+    overlayWindow.webContents.once("did-finish-load", () => {
+      overlayWindow.webContents.openDevTools({ mode: "detach" });
+    });
+  }
+  overlayWindow.webContents.on("did-finish-load", () => {
+    log.event("overlay:did-finish-load", {
+      visible: overlayWindow.isVisible(),
+      bounds: overlayWindow.getBounds(),
+    });
+    broadcastScreenBounds();
+    // Safety net — some transparent-overlay configs on Windows don't
+    // auto-composite until showInactive() is called after first paint.
+    if (!overlayWindow.isDestroyed() && !overlayWindow.isVisible()) {
+      overlayWindow.showInactive();
+    }
+  });
   mcpServer.setOverlayWindow(overlayWindow);
   overlayWindow.on("closed", () => {
     setWindows(null, getPanelWindow());
@@ -218,14 +295,40 @@ function createPanelWindow(trayBounds) {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      // The panel plays TTS audio chunks from the voice pipeline. Without
+      // this, Chromium blocks subsequent Audio.play() calls after the first
+      // because the panel window has no direct user gesture (global PTT
+      // hotkeys don't count as user activation inside the renderer).
+      autoplayPolicy: "no-user-gesture-required",
+      // Keep audio/timers running when the panel is hidden — it receives
+      // TTS chunks from background PTT sessions while not visible.
+      backgroundThrottling: false,
     },
   });
   panelWindow.loadFile(path.join(__dirname, "panel.html"));
+  const raiseOverlayAbovePanel = () => {
+    const ov = getOverlayWindow();
+    if (!ov || ov.isDestroyed()) return;
+    // Re-assert the topmost level, then bump z-order. Windows sometimes
+    // demotes a HWND_TOPMOST window when another topmost window takes
+    // focus, so just calling moveTop() isn't enough on its own.
+    ov.setAlwaysOnTop(true, "screen-saver");
+    ov.moveTop();
+  };
   panelWindow.webContents.on("did-finish-load", () => {
     broadcastScreenBounds();
-    if (trayBounds) positionPanelNearTray(trayBounds);
-    panelWindow.show();
+    // Only show when the panel was opened from the tray click (trayBounds
+    // provided). When we pre-create the panel at startup, we want it to
+    // stay hidden but alive so it can receive TTS audio chunks.
+    if (trayBounds) {
+      positionPanelNearTray(trayBounds);
+      panelWindow.show();
+    }
   });
+  panelWindow.on("show", raiseOverlayAbovePanel);
+  // Clicking on the panel can shuffle z-order on Windows — raise the
+  // overlay again whenever the panel gains focus.
+  panelWindow.on("focus", raiseOverlayAbovePanel);
   panelWindow.on("close", (event) => {
     if (!app.isQuitting) { event.preventDefault(); panelWindow.hide(); }
   });
@@ -408,8 +511,8 @@ ipcMain.on("inference:run", async (_event, { transcript, provider, model, attach
     const settings = loadSettings();
     log.event("inference:start", {
       transcript: transcript?.slice(0, 120),
-      provider: provider || settings.chatProvider || "anthropic",
-      model: model || settings.chatModel || "claude-sonnet-4-6",
+      provider: provider || settings.chatProvider || "openai",
+      model: model || settings.chatModel || "gpt-4o",
       voiceMode: !!voiceMode,
       attachments: attachments?.length || 0,
     });
@@ -481,8 +584,8 @@ ipcMain.on("inference:run", async (_event, { transcript, provider, model, attach
     }
 
     await runInference({
-      provider: provider || settings.chatProvider || "anthropic",
-      model: model || settings.chatModel || "claude-sonnet-4-6",
+      provider: provider || settings.chatProvider || "openai",
+      model: model || settings.chatModel || "gpt-4o",
       transcript,
       screens,
       settings,
@@ -572,11 +675,11 @@ ipcMain.on("inference:clear-history", () => clearHistory());
 
 ipcMain.handle("stt:start", async (_event, provider) => {
   const settings = loadSettings();
-  const sttProvider = provider || settings.sttProvider || "assemblyai";
+  const sttProvider = provider || settings.sttProvider || "openai";
   log.event("stt:start", { provider: sttProvider });
   try {
     await transcription.startSession(
-      provider || settings.sttProvider || "assemblyai",
+      sttProvider,
       settings,
       (text) => broadcast("stt:transcript", { text, isFinal: false }),
       (text) => broadcast("stt:transcript", { text, isFinal: true }),
@@ -814,10 +917,19 @@ app.whenReady().then(() => {
     });
   });
 
-  log.event("app:ready", { platform: process.platform, isDev: !app.isPackaged });
+  log.event("app:ready", {
+    platform: process.platform,
+    packaged: app.isPackaged,
+    devServer: !!process.env.ELECTRON_DEV_SERVER_URL,
+  });
 
   createTray();
   createOverlayWindow();
+  // Pre-create the panel hidden so it exists at startup to receive TTS
+  // audio chunks during global push-to-talk, even if the user hasn't
+  // clicked the tray yet. It stays hidden until the user actually opens
+  // it (createPanelWindow only calls show() when trayBounds is provided).
+  createPanelWindow(null);
   startCursorTracking();
   registerPushToTalk();
   startScreenshotInterceptor();
@@ -898,6 +1010,11 @@ function startScreenshotInterceptor() {
 
 let isPushToTalkActive = false;
 let pttFinalTranscript = "";
+// True between stopPushToTalk and the arrival of the final STT transcript.
+// We hand off inference via the onFinal callback when this is set, so we
+// don't have to race a fixed timeout against a slow Whisper HTTP call.
+let pttAwaitingFinal = false;
+let pttFinalTimeout = null;
 let registeredPTTShortcut = null;
 
 /**
@@ -952,7 +1069,7 @@ function registerPushToTalk() {
 
     const currentSettings = loadSettings();
     transcription.startSession(
-      currentSettings.sttProvider || "assemblyai",
+      currentSettings.sttProvider || "openai",
       currentSettings,
       (text) => {
         pttFinalTranscript = text;
@@ -963,6 +1080,14 @@ function registerPushToTalk() {
       (text) => {
         pttFinalTranscript = text;
         broadcast("stt:transcript", { text, isFinal: true });
+        // If the user has already released PTT and we're waiting for
+        // transcription to finish (non-streaming providers like OpenAI
+        // Whisper), kick off inference now that the text has arrived.
+        if (pttAwaitingFinal) {
+          pttAwaitingFinal = false;
+          if (pttFinalTimeout) { clearTimeout(pttFinalTimeout); pttFinalTimeout = null; }
+          runPTTInference();
+        }
       },
       (err) => console.error("[STT]", err.message)
     ).catch(err => console.error("[STT] Start failed:", err.message));
@@ -987,76 +1112,113 @@ function registerPushToTalk() {
 function stopPushToTalk() {
   if (!isPushToTalkActive) return;
   isPushToTalkActive = false;
-  transcription.requestFinal();
   sendToOverlay("overlay-command", "cursor:set-voice-state", { state: "processing" });
   sendToOverlay("push-to-talk", "stop");
   sendToPanel("push-to-talk", "stop");
 
-  // Wait for final transcript then run inference
-  setTimeout(async () => {
-    transcription.stopSession();
-    if (pttFinalTranscript.trim()) {
-      log.event("ptt:inference", { transcript: pttFinalTranscript.slice(0, 80) });
-      try {
-        const screens = await captureAllScreens();
-        const cursorScreen = screens.find(s => s.isCursorScreen) || screens[0];
-        const currentSettings = loadSettings();
-        const allTools = getInferenceTools(currentSettings, pttFinalTranscript);
-        let fullResponseText = "";
-        let firstTextReceived = false;
+  pttAwaitingFinal = true;
+  transcription.requestFinal();
 
-        await runInference({
-          provider: currentSettings.chatProvider || "anthropic",
-          model: currentSettings.chatModel || "claude-sonnet-4-6",
-          transcript: pttFinalTranscript,
-          screens,
-          settings: currentSettings,
-          mcpTools: allTools.length > 0 ? allTools : undefined,
-          onChunk: async (chunk) => {
-            if (chunk.type === "text") {
-              fullResponseText = chunk.text || "";
-              // Switch to responding on first text chunk
-              if (!firstTextReceived) {
-                firstTextReceived = true;
-                sendToOverlay("overlay-command", "cursor:set-voice-state", { state: "responding" });
-              }
-            }
-            if (chunk.type === "done") {
-              if (fullResponseText) {
-                const parsed = parsePointingCoordinates(fullResponseText);
-                if (parsed.coordinate) {
-                  const targetScreen = parsed.screenNumber
-                    ? screens[Math.max(0, Math.min(parsed.screenNumber - 1, screens.length - 1))]
-                    : (cursorScreen || screens[0]);
-                  if (targetScreen) {
-                    const sc = screenshotPointToScreenCoords(parsed.coordinate.x, parsed.coordinate.y, targetScreen);
-                    chunk.scaledPoint = {
-                      x: Math.round(sc.x), y: Math.round(sc.y),
-                      label: parsed.elementLabel || "element",
-                      bubbleText: parsed.spokenText.length > 80
-                        ? parsed.spokenText.slice(0, 77).replace(/\s+\S*$/, "") + "\u2026"
-                        : parsed.spokenText,
-                    };
-                  }
-                }
-              }
-              // Back to idle when done
-              sendToOverlay("overlay-command", "cursor:set-voice-state", { state: "idle" });
-            }
-            broadcast("inference:chunk", chunk);
-          },
-        });
-      } catch (err) {
-        log.error("ptt:inference_error", err);
-        broadcast("inference:chunk", { type: "error", error: err.message });
-        sendToOverlay("overlay-command", "cursor:set-voice-state", { state: "idle" });
-      }
-    } else {
-      // No transcript — go back to idle immediately
-      sendToOverlay("overlay-command", "cursor:set-voice-state", { state: "idle" });
-    }
+  // Safety net — if no final transcript arrives within 90s (e.g. Whisper
+  // upload stalled, no speech detected), bail out and return to idle.
+  // The happy path completes via the onFinal callback, which calls
+  // runPTTInference() as soon as the text is ready — no matter how long
+  // the audio was.
+  if (pttFinalTimeout) clearTimeout(pttFinalTimeout);
+  pttFinalTimeout = setTimeout(() => {
+    if (!pttAwaitingFinal) return;
+    pttAwaitingFinal = false;
+    pttFinalTimeout = null;
+    log.event("ptt:final_timeout");
+    transcription.stopSession();
+    sendToOverlay("overlay-command", "cursor:set-voice-state", { state: "idle" });
     sendToOverlay("overlay-command", "cursor:set-bubble-text", { text: "" });
-  }, 2000);
+  }, 90000);
+}
+
+async function runPTTInference() {
+  transcription.stopSession();
+  if (!pttFinalTranscript.trim()) {
+    sendToOverlay("overlay-command", "cursor:set-voice-state", { state: "idle" });
+    sendToOverlay("overlay-command", "cursor:set-bubble-text", { text: "" });
+    return;
+  }
+  log.event("ptt:inference", { transcript: pttFinalTranscript.slice(0, 80) });
+  try {
+    const screens = await captureAllScreens();
+    const cursorScreen = screens.find(s => s.isCursorScreen) || screens[0];
+    const currentSettings = loadSettings();
+    const allTools = getInferenceTools(currentSettings, pttFinalTranscript);
+    let fullResponseText = "";
+
+    // Voice pipeline — synthesizes TTS sentence-by-sentence and streams
+    // audio chunks to the (hidden) panel window for playback.
+    if (activeVoicePipeline) { activeVoicePipeline.cancel(); activeVoicePipeline = null; }
+    const voicePipeline = new VoiceResponsePipeline({
+      onSpeakStart: () => {
+        log.event("voice:speak_start");
+        sendToOverlay("overlay-command", "cursor:set-voice-state", { state: "responding" });
+      },
+      onSpeakEnd: () => {
+        log.event("voice:speak_end");
+        sendToOverlay("overlay-command", "cursor:set-voice-state", { state: "idle" });
+        sendToOverlay("overlay-command", "cursor:set-bubble-text", { text: "" });
+        broadcast("inference:chunk", { type: "done" });
+      },
+      onPointAt: (point) => {
+        if (cursorScreen && point.imgX !== undefined) {
+          const sc = screenshotPointToScreenCoords(point.imgX, point.imgY, cursorScreen);
+          const flyPayload = { x: Math.round(sc.x), y: Math.round(sc.y), label: point.label, bubbleText: point.bubbleText };
+          sendToOverlay("overlay-command", "cursor:fly-to", flyPayload);
+          sendToPanel("inference:chunk", { type: "done", scaledPoint: flyPayload });
+        }
+      },
+      onRevealText: (accumulatedCleanText) => {
+        sendToPanel("inference:chunk", { type: "text", text: accumulatedCleanText });
+      },
+      speak: async (sentenceText) => {
+        try {
+          const result = await tts.speak(sentenceText, currentSettings);
+          if (!result) return null;
+          const audioBase64 = result.audioData.toString("base64");
+          sendToPanel("voice:audio-chunk", { type: "voice:audio", audioBase64, mimeType: result.mimeType });
+          return { audioBase64, mimeType: result.mimeType, audioSizeBytes: result.audioData.length };
+        } catch (err) {
+          console.error("[PTT VoicePipeline] TTS error:", err.message);
+          return null;
+        }
+      },
+    });
+    activeVoicePipeline = voicePipeline;
+
+    await runInference({
+      provider: currentSettings.chatProvider || "openai",
+      model: currentSettings.chatModel || "gpt-4o",
+      transcript: pttFinalTranscript,
+      screens,
+      settings: currentSettings,
+      mcpTools: allTools.length > 0 ? allTools : undefined,
+      onChunk: async (chunk) => {
+        if (chunk.type === "text") {
+          fullResponseText = chunk.text || "";
+        }
+        if (chunk.type === "done") {
+          // Hand off to the voice pipeline — it drives responding/idle
+          // state and the final "done" broadcast via its onSpeakEnd hook.
+          voicePipeline.feedText(fullResponseText);
+          voicePipeline.finish();
+          activeVoicePipeline = null;
+          return;
+        }
+        broadcast("inference:chunk", chunk);
+      },
+    });
+  } catch (err) {
+    log.error("ptt:inference_error", err);
+    broadcast("inference:chunk", { type: "error", error: err.message });
+    sendToOverlay("overlay-command", "cursor:set-voice-state", { state: "idle" });
+    if (activeVoicePipeline) { activeVoicePipeline.cancel(); activeVoicePipeline = null; }
+  }
 }
 
 // Toggle push-to-talk off (called from renderer)

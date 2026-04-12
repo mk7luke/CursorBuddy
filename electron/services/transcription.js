@@ -28,6 +28,9 @@ class AssemblyAISession {
   }
 
   async start() {
+    if (!this.apiKey) {
+      throw new Error("AssemblyAI API key required for STT (set in Settings → API Keys)");
+    }
     const url = `wss://streaming.assemblyai.com/v3/ws?sample_rate=16000&encoding=pcm_s16le&format_turns=true&speech_model=u3-rt-pro`;
     this.ws = new WebSocket(url, { headers: { Authorization: this.apiKey } });
 
@@ -102,6 +105,9 @@ class DeepgramSession {
   }
 
   async start() {
+    if (!this.apiKey) {
+      throw new Error("Deepgram API key required for STT (set in Settings → API Keys)");
+    }
     const url = `wss://api.deepgram.com/v1/listen?model=nova-3&encoding=linear16&sample_rate=16000&channels=1&punctuate=true&interim_results=true&vad_events=true`;
     this.ws = new WebSocket(url, { headers: { Authorization: `Token ${this.apiKey}` } });
 
@@ -159,6 +165,9 @@ class OpenAIWhisperSession {
   }
 
   async start() {
+    if (!this.apiKey) {
+      throw new Error("OpenAI API key required for STT (set in Settings → API Keys)");
+    }
     this.audioChunks = [];
   }
 

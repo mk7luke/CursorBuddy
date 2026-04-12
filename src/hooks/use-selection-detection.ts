@@ -40,7 +40,7 @@ export function useSelectionDetection(): void {
       });
 
       // If we have selection bounds, fly the cursor to the selection
-      eventBus.emit("cursor:show", undefined as never);
+      eventBus.emit("cursor:show");
 
       if (bounds) {
         const targetX = bounds.x + bounds.width + 10; // just right of selection

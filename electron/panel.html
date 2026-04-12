@@ -819,6 +819,9 @@ async function loadAllSettings() {
     document.documentElement.style.fontSize = (15.6 * settings.displayScale / 100) + 'px';
   }
   buildAllModelSlots();
+  // Flush any model corrections from buildAllModelSlots so stale
+  // cross-provider values in settings.json get rewritten on load.
+  persistSettings();
 
   // Set platform-aware shortcut labels
   const pttEl = document.getElementById('shortcut-ptt');
@@ -1275,7 +1278,13 @@ function populateModelDropdown(slotId, providerId) {
   if (!modSel) return;
   const provMap = slotId === 'cu' ? CU_PROVIDERS : PROVIDERS;
   const models = provMap[providerId]?.models || [];
-  const saved = settings[slotId + 'Model'];
+  let saved = settings[slotId + 'Model'];
+  // If saved model isn't valid for the current provider, snap to models[0]
+  // so we don't persist a stale cross-provider value (e.g. claude model under openai).
+  if (!models.includes(saved)) {
+    saved = models[0] || '';
+    settings[slotId + 'Model'] = saved;
+  }
   modSel.innerHTML = '';
   models.forEach(m => {
     const opt = document.createElement('option');
@@ -1283,7 +1292,6 @@ function populateModelDropdown(slotId, providerId) {
     if (m === saved) opt.selected = true;
     modSel.appendChild(opt);
   });
-  if (!saved && models.length) settings[slotId + 'Model'] = models[0];
 }
 
 function slotProviderChanged(slotId) {
@@ -2164,6 +2172,7 @@ function openTab(tabName) {
 
 function clearChat() {
   interruptCurrentResponse();
+  send('cursor:set-voice-state', { state: 'idle' });
   stopOnboardingTyping();
   renderChatStartup();
   chatStreaming = false;
@@ -2542,6 +2551,11 @@ chatInputEl?.addEventListener('blur', () => {
 // ── Mic: permissions, device enum, audio capture, STT ─────
 let micRecording = false;
 let liveBubbleEl = null;
+// True after the user manually stopped recording and we are waiting
+// for the final transcript (needed for non-streaming providers like
+// OpenAI Whisper, which only return text after requestFinal).
+let pendingFinalStt = false;
+let pendingFinalSttTimeout = null;
 let micStream = null;
 let audioContext = null;
 let scriptProcessor = null;
@@ -2604,7 +2618,10 @@ async function startMicCapture() {
     micStream = await navigator.mediaDevices.getUserMedia(constraints);
     enumerateMicDevices();
   } catch(err) {
-    document.getElementById('chat-transcript-hint').textContent = 'mic error';
+    const hint = document.getElementById('chat-transcript-hint');
+    hint.textContent = 'mic error: ' + (err?.message || err?.name || 'unknown');
+    hint.style.display = 'block';
+    console.error('[mic] getUserMedia failed:', err);
     document.getElementById('btn-mic').classList.add('no-permission');
     return false;
   }
@@ -2658,46 +2675,32 @@ async function toggleMic() {
     status.textContent = 'processing…'; status.style.display = 'block';
     send('cursor:set-voice-state', { state: 'processing' });
 
-    // Stop mic capture, request final transcript
+    // Stop mic capture and ask main for the final transcript.
+    // For streaming STT providers the bubble already has interim text;
+    // for non-streaming providers (OpenAI Whisper) the final text only
+    // arrives after the HTTP request completes — so we wait for the
+    // stt:transcript(isFinal=true) event in onTranscript() instead of
+    // finalizing synchronously.
     stopMicCapture();
+    pendingFinalStt = true;
     api.requestFinalTranscript();
 
-    // Wait briefly for final transcript, then stop STT
-    setTimeout(() => api.stopSTT(), 2500);
-
-    // Finalize the live bubble
-    if (liveBubbleEl) {
-      const finalText = liveBubbleEl.textContent.trim();
-      if (finalText && finalText !== 'listening…') {
-        liveBubbleEl.style.opacity = '1';
-        liveBubbleEl.style.fontStyle = 'normal';
-        liveBubbleEl = null;
-        // Send for inference (with interruption context if needed)
-        let transcript = finalText;
-        if (lastInterruptedResponse) {
-          const summary = lastInterruptedResponse.slice(0, 200);
-          transcript = `[the user interrupted your previous response which was: "${summary}${lastInterruptedResponse.length > 200 ? '...' : ''}" \u2014 if their new message is unrelated, answer it directly. if they seem to want you to continue, pick up where you left off]\n\n${finalText}`;
-          lastInterruptedResponse = null;
-        }
-        chatStreaming = true;
-        chatStreamText = '';
-        chatIsVoiceInitiated = true; // mic started this exchange
-        appendChatMsg('assistant', '', true);
-        api.runInference({ transcript: withWorkingDirectoryContext(transcript), voiceMode: true });
-      } else {
-        // No transcript — remove the empty bubble
+    // Fallback: if no final transcript arrives within 10s, clean up UI.
+    clearTimeout(pendingFinalSttTimeout);
+    pendingFinalSttTimeout = setTimeout(() => {
+      if (!pendingFinalStt) return;
+      pendingFinalStt = false;
+      api.stopSTT();
+      if (liveBubbleEl) {
         liveBubbleEl.parentElement?.remove();
         liveBubbleEl = null;
       }
-    }
-
-    setTimeout(() => {
-      if (!micRecording) {
-        btn.classList.remove('processing');
-        icon.className = 'icon-mic';
-        status.textContent = ''; status.style.display = 'none';
-      }
-    }, 1500);
+      btn.classList.remove('processing');
+      icon.className = 'icon-mic';
+      status.textContent = 'no speech detected'; status.style.display = 'block';
+      setTimeout(() => { status.textContent = ''; status.style.display = 'none'; }, 2500);
+      send('cursor:set-voice-state', { state: 'idle' });
+    }, 10000);
 
   } else {
     // ── Start recording ───────────────────────────────
@@ -2706,7 +2709,7 @@ async function toggleMic() {
     status.textContent = 'starting…'; status.style.display = 'block';
 
     // Start STT session in main process
-    const sttResult = await api.startSTT(settings.sttProvider || 'assemblyai');
+    const sttResult = await api.startSTT(settings.sttProvider || 'openai');
     if (!sttResult.ok) {
       status.textContent = sttResult.error || 'STT failed';
       icon.className = 'icon-mic';
@@ -2749,21 +2752,68 @@ async function toggleMic() {
   }
 }
 
+function finalizeLiveBubbleAndRunInference(text) {
+  if (liveBubbleEl) {
+    liveBubbleEl.textContent = text;
+    liveBubbleEl.style.opacity = '1';
+    liveBubbleEl.style.fontStyle = 'normal';
+    liveBubbleEl = null;
+  }
+  let transcript = text;
+  if (lastInterruptedResponse) {
+    const summary = lastInterruptedResponse.slice(0, 200);
+    transcript = `[the user interrupted your previous response which was: "${summary}${lastInterruptedResponse.length > 200 ? '...' : ''}" \u2014 if their new message is unrelated, answer it directly. if they seem to want you to continue, pick up where you left off]\n\n${text}`;
+    lastInterruptedResponse = null;
+  }
+  chatStreaming = true;
+  chatStreamText = '';
+  chatIsVoiceInitiated = true;
+  appendChatMsg('assistant', '', true);
+  api.runInference({ transcript: withWorkingDirectoryContext(transcript), voiceMode: true });
+}
+
 // ── Live transcript updates from STT ─────────────────────
 api.onTranscript(data => {
   const status = document.getElementById('chat-transcript-hint');
   const chinText = document.getElementById('chat-transcript-hint');
-  if (data.text && liveBubbleEl) {
+
+  // Interim text (streaming providers) — update the live bubble in place.
+  if (data.text && liveBubbleEl && !data.isFinal) {
     liveBubbleEl.textContent = data.text;
     document.getElementById('chat-messages').scrollTop = 999999;
     status.textContent = 'hearing you…'; status.style.display = 'block';
     chinText.textContent = data.text;
     chinText.classList.add('active');
+    return;
   }
-  if (data.isFinal && data.text && micRecording) {
-    status.textContent = ''; status.style.display = 'none';
-    setTimeout(() => { chinText.textContent = ''; chinText.classList.remove('active'); }, 2000);
-    toggleMic(); // Auto-stop on final
+
+  if (data.isFinal) {
+    // Manual stop waiting for final (e.g. OpenAI Whisper non-streaming case)
+    if (pendingFinalStt) {
+      pendingFinalStt = false;
+      clearTimeout(pendingFinalSttTimeout);
+      api.stopSTT();
+      const btn = document.getElementById('btn-mic');
+      const icon = document.getElementById('mic-icon');
+      btn.classList.remove('processing');
+      icon.className = 'icon-mic';
+      status.textContent = ''; status.style.display = 'none';
+      setTimeout(() => { chinText.textContent = ''; chinText.classList.remove('active'); }, 2000);
+      if (data.text && data.text.trim()) {
+        finalizeLiveBubbleAndRunInference(data.text.trim());
+      } else if (liveBubbleEl) {
+        liveBubbleEl.parentElement?.remove();
+        liveBubbleEl = null;
+      }
+      return;
+    }
+    // Streaming provider auto-endpointed — reuse existing UI and auto-stop.
+    if (data.text && micRecording) {
+      if (liveBubbleEl) liveBubbleEl.textContent = data.text;
+      status.textContent = ''; status.style.display = 'none';
+      setTimeout(() => { chinText.textContent = ''; chinText.classList.remove('active'); }, 2000);
+      toggleMic();
+    }
   }
 });
 
@@ -3061,10 +3111,23 @@ function _playAudioImmediate(base64, mimeType) {
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
     const blob = new Blob([bytes], { type: mimeType });
     const url = URL.createObjectURL(blob);
-    currentAudio = new Audio(url);
-    currentAudio.onended = () => { URL.revokeObjectURL(url); currentAudio = null; _playNextVoiceChunk(); };
-    currentAudio.play().catch(() => { _playNextVoiceChunk(); });
-  } catch(_) { _playNextVoiceChunk(); }
+    const a = new Audio(url);
+    currentAudio = a;
+    const advance = () => {
+      URL.revokeObjectURL(url);
+      if (currentAudio === a) currentAudio = null;
+      _playNextVoiceChunk();
+    };
+    a.onended = advance;
+    a.onerror = advance;
+    a.play().catch((err) => {
+      console.error('[panel] audio play failed:', err?.message || err);
+      advance();
+    });
+  } catch(err) {
+    console.error('[panel] audio decode failed:', err?.message || err);
+    _playNextVoiceChunk();
+  }
 }
 
 function queueVoiceAudio(base64, mimeType) {
@@ -3088,10 +3151,17 @@ if (api.onVoiceAudioChunk) {
 
 function stopCurrentAudio() {
   if (currentAudio) {
+    currentAudio.onended = null;
+    currentAudio.onerror = null;
     currentAudio.pause();
     currentAudio.src = '';
     currentAudio = null;
   }
+  // Drain any queued chunks and release the play gate so the next voice
+  // response starts cleanly. Without this, a mid-playback interrupt could
+  // leave voiceAudioPlaying=true and silently block every subsequent chunk.
+  voiceAudioQueue.length = 0;
+  voiceAudioPlaying = false;
 }
 
 /** Stop everything in flight — audio, streaming, STT, cursor state */
@@ -3118,8 +3188,12 @@ function interruptCurrentResponse() {
       streamEl.closest('[data-chat-role="assistant"]')?.remove();
     }
   }
-
-  send('cursor:set-voice-state', { state: 'idle' });
+  // NOTE: we intentionally do NOT force the cursor voice state to "idle"
+  // here. Callers that are interrupting to immediately start listening
+  // rely on main.js having already set the state to "listening" — sending
+  // idle from here races with that and leaves the cursor stuck on the
+  // idle triangle during PTT. Callers that actually want idle should
+  // send it explicitly.
 }
 
 // ── Init ──────────────────────────────────────────────────
