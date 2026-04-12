@@ -2858,7 +2858,10 @@ if (api.onPushToTalk) {
         chatIsVoiceInitiated = true;
       }
     } else if (action === 'stop' && micRecording) {
-      // Stop mic capture — main process already handles STT finalization
+      // Stop mic capture — main process owns STT finalization and inference
+      // via runPTTInference(). The panel only handles UI cleanup here.
+      // Do NOT call api.runInference() — that would duplicate the inference
+      // run that main already triggers from the onFinal STT callback.
       micRecording = false;
       stopMicCapture();
       const btn = document.getElementById('btn-mic');
@@ -2868,21 +2871,18 @@ if (api.onPushToTalk) {
       const status = document.getElementById('chat-transcript-hint');
       if (status) { status.textContent = 'processing…'; status.style.display = 'block'; }
 
-      // Finalize the live bubble
+      // Finalize the live bubble for display only — inference is handled
+      // by the main process. For streaming providers the bubble may have
+      // interim text; for non-streaming (Whisper) it still says "listening…".
       if (liveBubbleEl) {
         const finalText = liveBubbleEl.textContent.trim();
         if (finalText && finalText !== 'listening…') {
           liveBubbleEl.style.opacity = '1';
           liveBubbleEl.style.fontStyle = 'normal';
-          liveBubbleEl = null;
-          chatStreaming = true;
-          chatStreamText = '';
-          appendChatMsg('assistant', '', true);
-          api.runInference({ transcript: withWorkingDirectoryContext(finalText), voiceMode: true });
         } else {
           liveBubbleEl.parentElement?.remove();
-          liveBubbleEl = null;
         }
+        liveBubbleEl = null;
       }
 
       setTimeout(() => {

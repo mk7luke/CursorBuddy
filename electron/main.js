@@ -1192,8 +1192,8 @@ async function runPTTInference() {
     activeVoicePipeline = voicePipeline;
 
     await runInference({
-      provider: currentSettings.chatProvider || "openai",
-      model: currentSettings.chatModel || "gpt-4o",
+      provider: currentSettings.chatProvider || "anthropic",
+      model: currentSettings.chatModel || "claude-sonnet-4-6",
       transcript: pttFinalTranscript,
       screens,
       settings: currentSettings,
