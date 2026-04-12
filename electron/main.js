@@ -552,6 +552,7 @@ ipcMain.on("inference:run", async (_event, { transcript, provider, model, attach
           log.event("voice:speak_end");
           sendToOverlay("overlay-command", "cursor:set-voice-state", { state: "idle" });
           broadcast("inference:chunk", { type: "done" });
+          if (activeVoicePipeline === voicePipeline) activeVoicePipeline = null;
         },
         onPointAt: (point) => {
           if (cursorScreen && point.imgX !== undefined) {
@@ -603,7 +604,6 @@ ipcMain.on("inference:run", async (_event, { transcript, provider, model, attach
             // send "done" when all audio finishes playing.
             voicePipeline.feedText(fullResponseText);
             voicePipeline.finish();
-            activeVoicePipeline = null;
             return; // skip the broadcast() below — pipeline owns the timing now
           } else if (fullResponseText) {
             // Text mode: parse POINT tag using shared parser
@@ -1057,6 +1057,14 @@ function registerPushToTalk() {
       stopPushToTalk();
       return;
     }
+    // Block new PTT starts while a previous stop is still awaiting its
+    // final transcript from the STT provider — starting a new session
+    // would corrupt pttFinalTranscript and cause the old onFinal callback
+    // to trigger inference with the wrong (or empty) text.
+    if (pttAwaitingFinal) {
+      log.event("ptt:blocked_awaiting_final");
+      return;
+    }
 
     isPushToTalkActive = true;
     pttFinalTranscript = "";
@@ -1164,6 +1172,7 @@ async function runPTTInference() {
         sendToOverlay("overlay-command", "cursor:set-voice-state", { state: "idle" });
         sendToOverlay("overlay-command", "cursor:set-bubble-text", { text: "" });
         broadcast("inference:chunk", { type: "done" });
+        if (activeVoicePipeline === voicePipeline) activeVoicePipeline = null;
       },
       onPointAt: (point) => {
         if (cursorScreen && point.imgX !== undefined) {
@@ -1203,11 +1212,8 @@ async function runPTTInference() {
           fullResponseText = chunk.text || "";
         }
         if (chunk.type === "done") {
-          // Hand off to the voice pipeline — it drives responding/idle
-          // state and the final "done" broadcast via its onSpeakEnd hook.
           voicePipeline.feedText(fullResponseText);
           voicePipeline.finish();
-          activeVoicePipeline = null;
           return;
         }
         broadcast("inference:chunk", chunk);
