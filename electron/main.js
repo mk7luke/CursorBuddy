@@ -511,8 +511,8 @@ ipcMain.on("inference:run", async (_event, { transcript, provider, model, attach
     const settings = loadSettings();
     log.event("inference:start", {
       transcript: transcript?.slice(0, 120),
-      provider: provider || settings.chatProvider || "openai",
-      model: model || settings.chatModel || "gpt-4o",
+      provider: provider || settings.chatProvider || "anthropic",
+      model: model || settings.chatModel || "claude-sonnet-4-6",
       voiceMode: !!voiceMode,
       attachments: attachments?.length || 0,
     });
@@ -584,8 +584,8 @@ ipcMain.on("inference:run", async (_event, { transcript, provider, model, attach
     }
 
     await runInference({
-      provider: provider || settings.chatProvider || "openai",
-      model: model || settings.chatModel || "gpt-4o",
+      provider: provider || settings.chatProvider || "anthropic",
+      model: model || settings.chatModel || "claude-sonnet-4-6",
       transcript,
       screens,
       settings,
@@ -675,7 +675,7 @@ ipcMain.on("inference:clear-history", () => clearHistory());
 
 ipcMain.handle("stt:start", async (_event, provider) => {
   const settings = loadSettings();
-  const sttProvider = provider || settings.sttProvider || "openai";
+  const sttProvider = provider || settings.sttProvider || "assemblyai";
   log.event("stt:start", { provider: sttProvider });
   try {
     await transcription.startSession(
@@ -1069,7 +1069,7 @@ function registerPushToTalk() {
 
     const currentSettings = loadSettings();
     transcription.startSession(
-      currentSettings.sttProvider || "openai",
+      currentSettings.sttProvider || "assemblyai",
       currentSettings,
       (text) => {
         pttFinalTranscript = text;
@@ -1119,7 +1119,7 @@ function stopPushToTalk() {
   pttAwaitingFinal = true;
   transcription.requestFinal();
 
-  // Safety net — if no final transcript arrives within 90s (e.g. Whisper
+  // Safety net — if no final transcript arrives within 30s (e.g. Whisper
   // upload stalled, no speech detected), bail out and return to idle.
   // The happy path completes via the onFinal callback, which calls
   // runPTTInference() as soon as the text is ready — no matter how long
@@ -1133,7 +1133,7 @@ function stopPushToTalk() {
     transcription.stopSession();
     sendToOverlay("overlay-command", "cursor:set-voice-state", { state: "idle" });
     sendToOverlay("overlay-command", "cursor:set-bubble-text", { text: "" });
-  }, 90000);
+  }, 30000);
 }
 
 async function runPTTInference() {

@@ -2709,7 +2709,7 @@ async function toggleMic() {
     status.textContent = 'starting…'; status.style.display = 'block';
 
     // Start STT session in main process
-    const sttResult = await api.startSTT(settings.sttProvider || 'openai');
+    const sttResult = await api.startSTT(settings.sttProvider || 'assemblyai');
     if (!sttResult.ok) {
       status.textContent = sttResult.error || 'STT failed';
       icon.className = 'icon-mic';
