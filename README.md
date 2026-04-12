@@ -1,5 +1,7 @@
 # CursorBuddy
 
+ANDROID VERSION https://github.com/jasonkneen/cursorbuddy-android
+
 <img width="1024" height="1024" alt="cblogoandtitle" src="https://github.com/user-attachments/assets/885c1271-ede0-4f48-a66b-551ef95bf9dc" />
 
 Drop-in animated cursor companion. A blue triangle follows the mouse, flies to screen elements along bezier arcs, shows speech bubbles, and visualises voice states. Works two ways:
